@@ -2,6 +2,9 @@ import plotly.graph_objects as go
 import pandas as pd
 
 def plot_kpi8(pivot_df):
+    pivot_df = pivot_df.copy()
+    pivot_df.index.name = "Quarter"
+    pivot_df = pivot_df.reset_index()
     pivot_melt = pivot_df.melt(id_vars=["Quarter"], var_name="Vehicle_Model", value_name="Volume")
     fig = go.Figure()
     for model in pivot_melt["Vehicle_Model"].unique():
@@ -11,7 +14,10 @@ def plot_kpi8(pivot_df):
     fig.show()
 
 def plot_kpi13(pivot_df):
+    pivot_df = pivot_df.copy()
     country_col = pivot_df.columns[0]
+    pivot_df.index.name = "Row"
+    pivot_df = pivot_df.reset_index(drop=True)
     pivot_melt = pivot_df.melt(id_vars=[country_col], var_name="Quarter_Brand", value_name="Volume")
     fig = go.Figure()
     for qb in pivot_melt["Quarter_Brand"].unique():
