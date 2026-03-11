@@ -1,20 +1,21 @@
-import plotly.express as px
+import plotly.graph_objects as go
 import pandas as pd
 
-def plot_kpi8(df):
-    df_plot = df.copy()
-    if "Total" in df_plot.index: df_plot = df_plot.drop("Total")
-    df_plot = df_plot.melt(id_vars=["Quarter"], var_name="Vehicle Model", value_name="Volume")
-    fig = px.bar(df_plot, x="Quarter", y="Volume", color="Vehicle Model", text="Volume")
-    fig.update_traces(textposition="outside")
-    fig.update_layout(title="KPI 8: Volume per Vehicle Model per Quarter", barmode="group")
+def plot_kpi8(pivot_df):
+    pivot_melt = pivot_df.melt(id_vars=["Quarter"], var_name="Vehicle_Model", value_name="Volume")
+    fig = go.Figure()
+    for model in pivot_melt["Vehicle_Model"].unique():
+        sub = pivot_melt[pivot_melt["Vehicle_Model"]==model]
+        fig.add_bar(x=sub["Quarter"].astype(str), y=sub["Volume"], name=model)
+    fig.update_layout(title="KPI 8 - Vehicle Volume per Quarter", xaxis_title="Quarter", yaxis_title="Volume", barmode="group")
     fig.show()
 
-def plot_kpi13(df):
-    df_plot = df.copy()
-    volume_cols = [c for c in df_plot.columns if "_vol" in c]
-    df_plot = df_plot.reset_index().melt(id_vars=["COUNTRY"], value_vars=volume_cols, var_name="Quarter", value_name="Volume")
-    fig = px.bar(df_plot, x="Quarter", y="Volume", color="COUNTRY", text="Volume")
-    fig.update_traces(textposition="outside")
-    fig.update_layout(title="KPI 13: Top Brand Volume per Quarter per Country", barmode="group")
+def plot_kpi13(pivot_df):
+    country_col = pivot_df.columns[0]
+    pivot_melt = pivot_df.melt(id_vars=[country_col], var_name="Quarter_Brand", value_name="Volume")
+    fig = go.Figure()
+    for qb in pivot_melt["Quarter_Brand"].unique():
+        sub = pivot_melt[pivot_melt["Quarter_Brand"]==qb]
+        fig.add_bar(x=sub[country_col], y=sub["Volume"], name=qb)
+    fig.update_layout(title="KPI 13 - Top Brand Volume per Quarter per Country", xaxis_title="Country", yaxis_title="Volume", barmode="group")
     fig.show()
