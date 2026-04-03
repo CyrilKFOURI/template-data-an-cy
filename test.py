@@ -1,7 +1,7 @@
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-def plot_kpi_share(df):
+def plot_kpi_share(df,col):
 
     df=df.copy()
     df["TIME"]=df["YEAR"].astype(str)+"-"+df["Quarter"]
@@ -16,27 +16,28 @@ def plot_kpi_share(df):
 
         total=df_c.groupby("TIME")["VOLUME"].sum().reset_index()
 
-        # top brands global sur le pays
-        brand_rank=df_c.groupby("BRAND")["VOLUME"].sum().sort_values(ascending=False)
-        brands=brand_rank.index.tolist()
+        rank=df_c.groupby(col)["VOLUME"].sum().sort_values(ascending=False)
+        cats=rank.index.tolist()
 
-        if len(brands)>5:
-            brands=brands[:5]
+        if len(cats)>5:
+            cats=cats[:5]
             mode="group"
         else:
             mode="stack"
 
-        for brand in brands:
-            d=df_c[df_c["BRAND"]==brand]
+        df_c=df_c[df_c[col].isin(cats)]
+
+        for c in cats:
+            d=df_c[df_c[col]==c]
             if d.empty:
                 continue
-            fig.add_trace(go.Bar(x=d["TIME"],y=d["SHARE"],name=brand,legendgroup=brand,showlegend=(i==1)),row=1,col=i,secondary_y=False)
+            fig.add_trace(go.Bar(x=d["TIME"],y=d["SHARE"],name=c,legendgroup=c,showlegend=(i==1)),row=1,col=i,secondary_y=False)
 
         fig.add_trace(go.Scatter(x=total["TIME"],y=total["VOLUME"],mode='lines+markers',name="TOTAL",legendgroup="TOTAL",showlegend=(i==1)),row=1,col=i,secondary_y=True)
 
         fig.update_layout(barmode=mode)
 
-    fig.update_layout(title="Market Share by Brand (Quarterly)",height=500)
+    fig.update_layout(title=f"Market Share by {col} (Quarterly)",height=500)
     fig.update_yaxes(title_text="Share (%)",secondary_y=False)
     fig.update_yaxes(title_text="Volume",secondary_y=True)
 
