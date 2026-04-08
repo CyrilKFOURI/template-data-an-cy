@@ -9,6 +9,11 @@ country_map = {
 
 df["COB_DATE"] = pd.to_datetime(df["COB_DATE"])
 
+df = df[
+    (df["COB_DATE"] >= "2023-02-01") &
+    (df["COB_DATE"] < "2026-03-01")
+]
+
 for country_code in df["COUNTRY"].unique():
     if country_code not in country_map:
         continue
