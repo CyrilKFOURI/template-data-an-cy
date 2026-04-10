@@ -11,32 +11,34 @@ fuel_mapping = {
     }
 }
 
-def map_power_category(row, country):
-    if row['POWER CATEGORY'] == 'NHEV':
-        return fuel_mapping.get(country, {}).get(row['FUEL_TYPE2'], None)
-    return row['POWER CATEGORY']
-
-df['POWER CATEGORY_2'] = df.apply(lambda row: map_power_category(row, COUNTRY), axis=1)
-
-
-
-
-
-
-fuel_map_generic = {
-    'PETROL': 'G',
+fuel_suffix_map = {
     'GASOLINA': 'G',
     'Benzina': 'G',
+    'PETROL': 'G',
     'DIESEL': 'D',
     'Diesel': 'D'
 }
 
-df['POWER CATEGORY_3'] = df['POWER CATEGORY']
+mapping = fuel_mapping.get(COUNTRY, {})
 
-fuel_suffix = df['FUEL_TYPE2'].map(fuel_map_generic)
+# -------- CATEGORY 2 --------
+df['POWER CATEGORY_2'] = np.where(
+    df['POWER CATEGORY'].eq('NHEV'),
+    df['FUEL_TYPE2'].map(mapping),
+    df['POWER CATEGORY']
+)
 
-mask_mhev = df['POWER CATEGORY'] == 'MHEV'
-mask_phev = df['POWER CATEGORY'] == 'PLUG-IN HYBRID'
+# -------- CATEGORY 3 --------
+fuel_suffix = df['FUEL_TYPE2'].map(fuel_suffix_map)
 
-df.loc[mask_mhev, 'POWER CATEGORY_3'] = 'MHEV-' + fuel_suffix
-df.loc[mask_phev, 'POWER CATEGORY_3'] = 'PHEV-' + fuel_suffix
+df['POWER CATEGORY_3'] = np.select(
+    [
+        df['POWER CATEGORY'].eq('MHEV'),
+        df['POWER CATEGORY'].eq('PLUG-IN HYBRID')
+    ],
+    [
+        'MHEV-' + fuel_suffix,
+        'PHEV-' + fuel_suffix
+    ],
+    default=df['POWER CATEGORY']
+)
