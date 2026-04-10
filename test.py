@@ -30,17 +30,14 @@ f1 = df['FUEL_TYPE'].astype(str).str.strip().str.upper()
 # =========================
 # CATEGORY 2
 # =========================
-fuel2 = f2.map(mapping)
-fuel1 = f1.map(mapping)
-
 df['POWER_CATEGORY_2'] = np.where(
     pc.eq('MHEV'),
     np.where(
-        fuel2.notna(),
-        fuel2,
+        f2.map(mapping).notna(),
+        f2.map(mapping),
         np.where(
-            fuel1.notna(),
-            fuel1,
+            f1.map(mapping).notna(),
+            f1.map(mapping),
             'MHEV'
         )
     ),
