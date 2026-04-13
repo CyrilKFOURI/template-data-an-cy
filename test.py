@@ -1,1 +1,0 @@
-df["VEHICLE_TYPE_TEMP"] = np.where(np.random.rand(len(df)) < 0.1, "SUV", None)
