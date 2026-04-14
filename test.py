@@ -1,155 +1,24 @@
-body {
-    margin: 0;
-    font-family: Arial, Helvetica, sans-serif;
-    background: linear-gradient(180deg, #f5f7fb 0%, #eef2f7 100%);
-    color: #132238;
-}
+def kp12_lease_25_30(self, NOVA_ASSET_STATUS, country, bike_or_car='CAR'):
 
-.page-wrap {
-    max-width: 1520px;
-    margin: 0 auto;
-    padding: 24px;
-}
+    df = self.df[
+        (self.df["NOVA_ASSET_STATUS"] == NOVA_ASSET_STATUS) &
+        (self.df["COUNTRY"] == country) &
+        (self.df["BIKE_OR_CAR"] == bike_or_car) &
+        (self.df["YEAR"] == 2025)
+    ]
 
-.top-nav {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px;
-    margin-bottom: 16px;
-}
+    f = lambda x: (
+        x.loc[
+            (x["FINAL_CONTRACT_DURATION"] > 25) &
+            (x["FINAL_CONTRACT_DURATION"] <= 30),
+            "VEHICLE_ID"
+        ].nunique()
+        /
+        x["VEHICLE_ID"].nunique()
+    ) * 100
 
-.nav-link {
-    text-decoration: none;
-    background: #102a43;
-    color: white;
-    border-radius: 12px;
-    padding: 8px 12px;
-    font-size: 13px;
-    font-weight: 700;
-}
+    kpis = df.groupby("MONTH").apply(f)
 
-.hero {
-    background: linear-gradient(135deg, #102a43 0%, #163e63 55%, #1d5f99 100%);
-    color: white;
-    border-radius: 22px;
-    padding: 24px 28px;
-    box-shadow: 0 14px 34px rgba(16, 42, 67, 0.18);
-    margin-bottom: 20px;
-}
+    kpis = kpis.reset_index().rename(columns={0: "25-30_months_%"})
 
-.hero h1 {
-    margin: 0;
-    font-size: 30px;
-    letter-spacing: 0.3px;
-}
-
-.hero p {
-    margin: 8px 0 0 0;
-    opacity: 0.9;
-    max-width: 1000px;
-}
-
-.filter-bar {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(180px, 1fr));
-    gap: 14px;
-    margin-bottom: 18px;
-}
-
-.filter-box {
-    background: white;
-    padding: 14px 16px;
-    border-radius: 16px;
-    box-shadow: 0 8px 24px rgba(16, 42, 67, 0.08);
-}
-
-.filter-label {
-    font-size: 12px;
-    font-weight: 700;
-    color: #52616b;
-    margin-bottom: 8px;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-}
-
-.cards-grid {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(200px, 1fr));
-    gap: 12px;
-    margin-bottom: 22px;
-}
-
-.kpi-card {
-    background: white;
-    border-radius: 18px;
-    padding: 12px 14px;
-    box-shadow: 0 10px 26px rgba(16, 42, 67, 0.08);
-    min-height: 102px;
-}
-
-.kpi-card-title {
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: #637381;
-    margin-bottom: 8px;
-    font-weight: 700;
-}
-
-.kpi-card-value {
-    font-size: 24px;
-    font-weight: 800;
-    line-height: 1.05;
-    color: #102a43;
-    margin-bottom: 6px;
-}
-
-.kpi-card-subtitle {
-    font-size: 11px;
-    color: #52616b;
-    line-height: 1.35;
-}
-
-.panel {
-    background: white;
-    border-radius: 18px;
-    box-shadow: 0 10px 26px rgba(16, 42, 67, 0.08);
-    padding: 18px;
-    margin-bottom: 18px;
-}
-
-.panel-title {
-    font-size: 18px;
-    font-weight: 800;
-    color: #102a43;
-    margin-bottom: 12px;
-}
-
-.controls-inline {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(220px, 1fr));
-    gap: 12px;
-    margin-bottom: 14px;
-}
-
-.small-note {
-    font-size: 12px;
-    color: #66788a;
-    margin-top: 8px;
-}
-
-@media (max-width: 1100px) {
-    .filter-bar, .cards-grid, .controls-inline {
-        grid-template-columns: 1fr 1fr;
-    }
-}
-
-@media (max-width: 760px) {
-    .filter-bar, .cards-grid, .controls-inline {
-        grid-template-columns: 1fr;
-    }
-
-    .hero h1 {
-        font-size: 24px;
-    }
-}
+    return kpis
