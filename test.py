@@ -1,24 +1,52 @@
-def kp12_lease_25_30(self, NOVA_ASSET_STATUS, country, bike_or_car='CAR'):
+def kp18_production_ytd(df: pd.DataFrame,
+                        country: str,
+                        year: int,
+                        asset_status: str = "ALL",
+                        metric_mode: str = "volume") -> pd.DataFrame:
 
-    df = self.df[
-        (self.df["NOVA_ASSET_STATUS"] == NOVA_ASSET_STATUS) &
-        (self.df["COUNTRY"] == country) &
-        (self.df["BIKE_OR_CAR"] == bike_or_car) &
-        (self.df["YEAR"] == 2025)
-    ]
+    # 🔹 on garde TON filter_base
+    subset = filter_base(df, country, year,
+                         status="ALL",   # important
+                         bike_or_car="CAR")
 
-    f = lambda x: (
-        x.loc[
-            (x["FINAL_CONTRACT_DURATION"] > 25) &
-            (x["FINAL_CONTRACT_DURATION"] <= 30),
-            "VEHICLE_ID"
-        ].nunique()
-        /
-        x["VEHICLE_ID"].nunique()
-    ) * 100
+    # 🔹 on applique le status APRES (comme ton KPI initial)
+    if asset_status != "ALL":
+        subset = subset[subset["NOVA_ASSET_STATUS"] == asset_status]
 
-    kpis = df.groupby("MONTH").apply(f)
+    # 🔹 filtre date EXACT comme ton premier KPI
+    subset = subset[
+        (subset["CONTRACT_START_DATE"].dt.year == year) &
+        (subset["CONTRACT_START_DATE"].dt.month == subset["MONTH"])
+    ].copy()
 
-    kpis = kpis.reset_index().rename(columns={0: "25-30_months_%"})
+    # 🔹 clean power category (très important)
+    subset["POWER_CATEGORY"] = subset["POWER_CATEGORY"].where(
+        subset["POWER_CATEGORY"].isin([
+            "DIESEL", "PETROL", "FULL HYBRID",
+            "PLUG-IN HYBRID", "ELECTRIC"
+        ]),
+        "Others"
+    )
 
-    return kpis
+    # 🔹 groupby
+    grouped = subset.groupby(["YEAR", "MONTH", "POWER_CATEGORY"]) \
+                    .size() \
+                    .reset_index(name="VOLUME")
+
+    # 🔹 pivot
+    table = grouped.pivot(index=["YEAR", "MONTH"],
+                          columns="POWER_CATEGORY",
+                          values="VOLUME") \
+                   .fillna(0) \
+                   .reset_index()
+
+    # 🔹 share mode
+    metric_cols = [c for c in table.columns if c not in ["YEAR", "MONTH"]]
+
+    if metric_mode.lower() == "share":
+        totals = table[metric_cols].sum(axis=1)
+        table[metric_cols] = table[metric_cols].div(
+            totals.replace(0, 1), axis=0
+        ) * 100
+
+    return table.round(3)
