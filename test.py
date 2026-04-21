@@ -4,6 +4,7 @@ import calendar
 import glob
 import os
 import re
+from functools import lru_cache
 from pathlib import Path
 from html import escape as html_escape
 from typing import Any, cast
@@ -135,7 +136,7 @@ def prepare_data_set(df: pd.DataFrame) -> pd.DataFrame:
 
     df["POWER_CATEGORY_2"] = np.where(
         power_category.eq("MHEV"),
-        pd.Series(mapped_fuel2, index=df.index).fillna(pd.Series(mapped_fuel1, index=df.index)).fillna(df["POWER_CATEGORY"]),
+        pd.Series(mapped_fuel2, index=df.index).fillna(pd.Series(mapped_fuel1, index=df.index)).fillna("DIESEL"),
         df["POWER_CATEGORY"],
     )
 
@@ -479,6 +480,124 @@ def resolve_month_value(country: str, year: int | str, month_value: int | str) -
     return int(month_value)
 
 
+@lru_cache(maxsize=512)
+def get_view1_metrics_cached(
+    kpi1_country: str,
+    kpi1_year: int | str,
+    kpi1_month: int | str,
+    kpi2_country: str,
+    kpi2_year: int | str,
+    kpi2_month: int | str,
+    kpi3_country: str,
+    kpi3_year: int | str,
+    kpi3_month: int | str,
+    kpi4_country: str,
+    kpi4_year: int | str,
+    kpi4_month: int | str,
+    kpi5_country: str,
+    kpi5_year: int | str,
+    kpi5_month: int | str,
+    kpi6_country: str,
+    kpi6_year: int | str,
+    kpi6_month: int | str,
+) -> dict[str, object]:
+    month3 = resolve_month_value(kpi3_country, kpi3_year, kpi3_month)
+    month4 = resolve_month_value(kpi4_country, kpi4_year, kpi4_month)
+    month5 = resolve_month_value(kpi5_country, kpi5_year, kpi5_month)
+    month6 = resolve_month_value(kpi6_country, kpi6_year, kpi6_month)
+
+    month1 = None if kpi1_month in (None, "ALL") else int(kpi1_month)
+    month2 = None if kpi2_month in (None, "ALL") else int(kpi2_month)
+
+    kpi1_base = df[
+        (df["COUNTRY"] == kpi1_country)
+        & (df["YEAR"] == int(kpi1_year))
+        & (df["NOVA_ASSET_STATUS"] == "IN FLEET")
+        & (df["BIKE_OR_CAR"] == "CAR")
+    ].copy()
+    if month1 is not None:
+        kpi1_base = kpi1_base[kpi1_base["MONTH"] == month1].copy()
+
+    kpi2_base = df[
+        (df["COUNTRY"] == kpi2_country)
+        & (df["YEAR"] == int(kpi2_year))
+        & (df["NOVA_ASSET_STATUS"] == "IN FLEET")
+        & (df["BIKE_OR_CAR"] == "CAR")
+    ].copy()
+    if month2 is not None:
+        kpi2_base = kpi2_base[kpi2_base["MONTH"] == month2].copy()
+
+    month3_base = df[
+        (df["COUNTRY"] == kpi3_country)
+        & (df["YEAR"] == int(kpi3_year))
+        & (df["MONTH"] == int(month3))
+        & (df["NOVA_ASSET_STATUS"] == "IN FLEET")
+        & (df["BIKE_OR_CAR"] == "CAR")
+    ].copy()
+
+    month4_base = df[
+        (df["COUNTRY"] == kpi4_country)
+        & (df["YEAR"] == int(kpi4_year))
+        & (df["MONTH"] == int(month4))
+        & (df["NOVA_ASSET_STATUS"] == "IN FLEET")
+        & (df["BIKE_OR_CAR"] == "CAR")
+    ].copy()
+
+    month5_base = df[
+        (df["COUNTRY"] == kpi5_country)
+        & (df["YEAR"] == int(kpi5_year))
+        & (df["MONTH"] == int(month5))
+        & (df["NOVA_ASSET_STATUS"] == "IN FLEET")
+        & (df["BIKE_OR_CAR"] == "CAR")
+    ].copy()
+
+    month6_base = df[
+        (df["COUNTRY"] == kpi6_country)
+        & (df["YEAR"] == int(kpi6_year))
+        & (df["MONTH"] == int(month6))
+        & (df["NOVA_ASSET_STATUS"] == "IN FLEET")
+        & (df["BIKE_OR_CAR"] == "CAR")
+    ].copy()
+
+    return {
+        "kpi1": kpi_lease_under_25(df, kpi1_country, kpi1_year, kpi1_month),
+        "kpi2": kpi_lease_25_30(df, kpi2_country, kpi2_year, kpi2_month),
+        "diesel_non": kpi_diesel_non_diesel(df, kpi3_country, kpi3_year, month3),
+        "hybrid": kpi_hybrid_share(df, kpi4_country, kpi4_year, month4),
+        "ev": kpi_ev_share(df, kpi5_country, kpi5_year, month5),
+        "pv_lcv": kpi_pv_lcv(df, kpi6_country, kpi6_year, month6),
+        "month3": month3,
+        "month4": month4,
+        "month5": month5,
+        "month6": month6,
+        "month1": month1,
+        "month2": month2,
+        "kpi1_volume": len(kpi1_base),
+        "kpi2_volume": len(kpi2_base),
+        "kpi3_volume": len(month3_base),
+        "kpi4_volume": len(month4_base),
+        "kpi5_volume": len(month5_base),
+        "kpi6_volume": len(month6_base),
+    }
+
+
+@lru_cache(maxsize=256)
+def get_kpi7_cached(
+    country: str,
+    start_date: str | None,
+    end_date: str | None,
+    status_group: str,
+    metric_mode: str,
+    period_mode: str,
+) -> tuple[pd.DataFrame, str, str, str]:
+    return kpi7_fuel_by_period(df, country, status_group, metric_mode, period_mode, start_date, end_date)
+
+
+@lru_cache(maxsize=256)
+def get_kpi8_cached(country: str, year: int | str, asset_status: str, metric_mode: str) -> tuple[pd.DataFrame, str, str, str]:
+    return kpi8_production_ytd(df, country, year, asset_status, metric_mode)
+
+
 def kpi_limit_status(value: float | None, limit: float | None) -> str:
     if value is None or pd.isna(value) or limit is None or pd.isna(limit):
         return "neutral"
@@ -514,21 +633,23 @@ def build_kpi_text_cell(text: str) -> html.Div:
 def render_kpi_summary_table(rows: list[dict[str, object]]) -> dash_table.DataTable:
     table_rows = []
     row_styles: list[dict[str, object]] = [{"if": {"row_index": "odd"}, "backgroundColor": "#f7f9fc"}]
+    signal_dot = {
+        "green": "🟢",
+        "orange": "🟠",
+        "red": "🔴",
+    }
     for row in rows:
         result_text = row["result_text"]
         signal = str(row["signal"])
-        if signal == "green":
-            row_styles.append({"if": {"row_index": len(table_rows), "column_id": "Result"}, "color": "#2f855a"})
-        elif signal == "orange":
-            row_styles.append({"if": {"row_index": len(table_rows), "column_id": "Result"}, "color": "#f0a202"})
-        elif signal == "red":
-            row_styles.append({"if": {"row_index": len(table_rows), "column_id": "Result"}, "color": "#d64545"})
+        row_index = len(table_rows)
+        dot = signal_dot.get(signal, "") if row_index < 2 else ""
+        result_value = f"{dot} {result_text}" if dot else str(result_text)
 
         table_rows.append(
             {
                 "Asset Risk, Financed Fleet": str(row["label"]),
                 "Period": str(row["period"]),
-                "Result": str(result_text),
+                "Result": result_value,
                 "Volume": int(cast(Any, row["volume"])),
                 "Unit": str(row["unit"]),
                 "Comment": str(row["comment"]),
@@ -741,15 +862,41 @@ def html_report_document(title: str, sections: list[str]) -> str:
     <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
     <title>{title}</title>
     <style>
-        body {{ font-family: Arial, Helvetica, sans-serif; margin: 32px; color: #102a43; background: #f7f9fc; }}
-        .page {{ max-width: 1200px; margin: 0 auto; background: #fff; padding: 28px; border: 1px solid #e6eaf0; border-radius: 12px; }}
+        :root {{
+            --ink: #102a43;
+            --muted: #627d98;
+            --line: #d9e2ec;
+            --line-soft: #e6eaf0;
+            --bg: #f7f9fc;
+            --card: #ffffff;
+            --accent: #1f6feb;
+            --accent-soft: #eaf2ff;
+        }}
+        body {{ font-family: Arial, Helvetica, sans-serif; margin: 32px; color: var(--ink); background: linear-gradient(180deg, #f3f7fb 0%, var(--bg) 220px); }}
+        .page {{ max-width: 1200px; margin: 0 auto; background: #fff; padding: 28px; border: 1px solid var(--line-soft); border-radius: 12px; box-shadow: 0 8px 24px rgba(16, 42, 67, 0.06); }}
         h1, h2, h3 {{ color: #102a43; }}
         .meta {{ background: #f1f5f9; padding: 16px; border-radius: 10px; margin-bottom: 20px; }}
+        .params-wrap {{ padding: 16px; border: 1px solid var(--line-soft); border-radius: 12px; background: #fbfdff; }}
+        .params-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 14px; }}
+        .param-card {{ background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px; min-height: 84px; display: flex; flex-direction: column; justify-content: space-between; }}
+        .param-name {{ font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; font-weight: 700; }}
+        .param-value {{ margin-top: 8px; font-size: 15px; font-weight: 700; color: var(--ink); background: var(--accent-soft); border-left: 4px solid var(--accent); border-radius: 8px; padding: 8px 10px; word-break: break-word; }}
+        .kpi-cards-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin-top: 14px; }}
+        .kpi-result-card {{ background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }}
+        .kpi-title {{ font-size: 14px; font-weight: 700; color: var(--ink); margin-bottom: 10px; }}
+        .kpi-result-value {{ font-size: 30px; font-weight: 800; color: var(--ink); line-height: 1.1; margin: 2px 0 12px; }}
+        .kpi-meta-line {{ font-size: 12px; color: var(--muted); margin: 4px 0; }}
+        .kpi-meta-key {{ font-weight: 700; color: var(--ink); margin-right: 6px; }}
         table {{ border-collapse: collapse; width: 100%; margin: 16px 0; }}
-        th, td {{ border: 1px solid #d9e2ec; padding: 8px 10px; text-align: left; vertical-align: top; }}
+        th, td {{ border: 1px solid var(--line); padding: 8px 10px; text-align: left; vertical-align: top; }}
         th {{ background: #102a43; color: #fff; }}
         .section {{ margin-bottom: 28px; }}
-        .muted {{ color: #627d98; }}
+        .muted {{ color: var(--muted); }}
+        @media (max-width: 768px) {{
+            body {{ margin: 14px; }}
+            .page {{ padding: 16px; }}
+            .param-value {{ font-size: 14px; }}
+        }}
     </style>
 </head>
 <body>
@@ -761,9 +908,35 @@ def html_report_document(title: str, sections: list[str]) -> str:
 </html>"""
 
 
-def build_kpi_params_list(params: list[tuple[str, object]]) -> str:
-        items = "".join(f"<li><strong>{name}:</strong> {value}</li>" for name, value in params)
-        return f"<div class=\"meta section\"><h2>Paramètres</h2><ul>{items}</ul></div>"
+def build_kpi_cards_section(title: str, cards: list[dict[str, object]]) -> str:
+    if not cards:
+        return f"<div class=\"section\"><h2>{html_escape(title)}</h2><p class=\"muted\">Aucune donnée disponible.</p></div>"
+
+    html_cards: list[str] = []
+    for card in cards:
+        label = html_escape(str(card.get("label", "KPI")))
+        result = html_escape(str(card.get("result", "N/A")))
+        params = card.get("params", [])
+
+        params_html = "".join(
+            f"<div class=\"kpi-meta-line\"><span class=\"kpi-meta-key\">{html_escape(str(name))}</span>{html_escape(str(value))}</div>"
+            for name, value in cast(list[tuple[str, object]], params)
+        )
+
+        html_cards.append(
+            "<div class=\"kpi-result-card\">"
+            f"<div class=\"kpi-title\">{label}</div>"
+            f"<div class=\"kpi-result-value\">{result}</div>"
+            f"{params_html}"
+            "</div>"
+        )
+
+    return (
+        "<div class=\"section\">"
+        f"<h2>{html_escape(title)}</h2>"
+        f"<div class=\"kpi-cards-grid\">{''.join(html_cards)}</div>"
+        "</div>"
+    )
 
 
 def build_html_table_from_df(df_table: pd.DataFrame, title: str) -> str:
@@ -875,43 +1048,70 @@ def build_view1_download_report(
     ]
     summary_df = pd.DataFrame(kpi_rows)
 
-    params = [
-        ("Country", country),
-        ("Year", year),
-        ("Month", month_value),
-        ("KPI 1 country", kpi1_country),
-        ("KPI 1 year", kpi1_year),
-        ("KPI 1 month", kpi1_month),
-        ("KPI 2 country", kpi2_country),
-        ("KPI 2 year", kpi2_year),
-        ("KPI 2 month", kpi2_month),
-        ("KPI 3 country", kpi3_country),
-        ("KPI 3 year", kpi3_year),
-        ("KPI 3 month", kpi3_month),
-        ("KPI 4 country", kpi4_country),
-        ("KPI 4 year", kpi4_year),
-        ("KPI 4 month", kpi4_month),
-        ("KPI 5 country", kpi5_country),
-        ("KPI 5 year", kpi5_year),
-        ("KPI 5 month", kpi5_month),
-        ("KPI 6 country", kpi6_country),
-        ("KPI 6 year", kpi6_year),
-        ("KPI 6 month", kpi6_month),
-        ("KPI 1 limit", kpi1_limit),
-        ("KPI 2 limit", kpi2_limit),
-        ("KPI 7 country", kpi7_country),
-        ("KPI 7 start date", kpi7_start_date),
-        ("KPI 7 end date", kpi7_end_date),
-        ("KPI 7 status", kpi7_status_group),
-        ("KPI 7 metric", kpi7_metric_mode),
-        ("KPI 7 period", kpi7_period_mode),
+    kpi_cards = [
+        {
+            "label": "KPI 1 - LTR < 25",
+            "result": percent_or_na(kpi1_val),
+            "params": [
+                ("Country", kpi1_country),
+                ("Period", summary_month_label(kpi1_year, None if kpi1_month in (None, "ALL") else int(kpi1_month))),
+                ("Volume", len(df[(df["COUNTRY"] == kpi1_country) & (df["YEAR"] == int(kpi1_year)) & (df["NOVA_ASSET_STATUS"] == "IN FLEET") & (df["BIKE_OR_CAR"] == "CAR")])),
+                ("Limit", "5%" if kpi1_limit is None else f"{kpi1_limit}%"),
+            ],
+        },
+        {
+            "label": "KPI 2 - LTR 25-30",
+            "result": percent_or_na(kpi2_val),
+            "params": [
+                ("Country", kpi2_country),
+                ("Period", summary_month_label(kpi2_year, None if kpi2_month in (None, "ALL") else int(kpi2_month))),
+                ("Volume", len(df[(df["COUNTRY"] == kpi2_country) & (df["YEAR"] == int(kpi2_year)) & (df["NOVA_ASSET_STATUS"] == "IN FLEET") & (df["BIKE_OR_CAR"] == "CAR")])),
+                ("Limit", "10%" if kpi2_limit is None else f"{kpi2_limit}%"),
+            ],
+        },
+        {
+            "label": "KPI 3 - DI vs Non-DI",
+            "result": f"{percent_or_na(diesel_non[0])} / {percent_or_na(diesel_non[1])}" if diesel_non[0] is not None else "N/A",
+            "params": [
+                ("Country", kpi3_country),
+                ("Period", summary_month_label(kpi3_year, month3)),
+                ("Volume", len(df[(df["COUNTRY"] == kpi3_country) & (df["YEAR"] == int(kpi3_year)) & (df["MONTH"] == int(month3)) & (df["NOVA_ASSET_STATUS"] == "IN FLEET") & (df["BIKE_OR_CAR"] == "CAR")]))
+            ],
+        },
+        {
+            "label": "KPI 4 - Hybrid Share",
+            "result": percent_or_na(hybrid_val),
+            "params": [
+                ("Country", kpi4_country),
+                ("Period", summary_month_label(kpi4_year, month4)),
+                ("Volume", len(df[(df["COUNTRY"] == kpi4_country) & (df["YEAR"] == int(kpi4_year)) & (df["MONTH"] == int(month4)) & (df["NOVA_ASSET_STATUS"] == "IN FLEET") & (df["BIKE_OR_CAR"] == "CAR")]))
+            ],
+        },
+        {
+            "label": "KPI 5 - EV Share",
+            "result": percent_or_na(ev_val),
+            "params": [
+                ("Country", kpi5_country),
+                ("Period", summary_month_label(kpi5_year, month5)),
+                ("Volume", len(df[(df["COUNTRY"] == kpi5_country) & (df["YEAR"] == int(kpi5_year)) & (df["MONTH"] == int(month5)) & (df["NOVA_ASSET_STATUS"] == "IN FLEET") & (df["BIKE_OR_CAR"] == "CAR")]))
+            ],
+        },
+        {
+            "label": "KPI 6 - PV vs LCV",
+            "result": f"{percent_or_na(pv_lcv_val[0])} / {percent_or_na(pv_lcv_val[1])}" if pv_lcv_val[0] is not None else "N/A",
+            "params": [
+                ("Country", kpi6_country),
+                ("Period", summary_month_label(kpi6_year, month6)),
+                ("Volume", len(df[(df["COUNTRY"] == kpi6_country) & (df["YEAR"] == int(kpi6_year)) & (df["MONTH"] == int(month6)) & (df["NOVA_ASSET_STATUS"] == "IN FLEET") & (df["BIKE_OR_CAR"] == "CAR")]))
+            ],
+        },
     ]
 
     return html_report_document(
         "Fleet Monitoring - Vue 1",
         [
-            build_kpi_params_list(params),
-            build_html_table_from_df(summary_df, "KPI summary"),
+            build_kpi_cards_section("KPIs", kpi_cards),
+            build_html_table_from_df(summary_df, "KPI summary table"),
             f"<div class=\"section\"><h2>KPI 7</h2>{figure_to_html_block(kpi7_fig)}</div>",
             build_html_table_from_df(kpi7_pivot.reset_index(), "KPI 7 pivot"),
         ],
@@ -941,48 +1141,73 @@ def build_view2_download_report(
         ("Metric", metric_mode),
     ]
 
+    metric_cols = [c for c in table_kpi8.columns if c not in ["YEAR", "MONTH"]]
+    if table_kpi8.empty:
+        kpi8_result = "N/A"
+    elif metric_mode == "volume":
+        kpi8_result = str(int(table_kpi8[metric_cols].sum().sum()))
+    else:
+        kpi8_result = f"{len(metric_cols)} catégories"
+
+    kpi8_cards = [
+        {
+            "label": "KPI 8 - Production YTD",
+            "result": kpi8_result,
+            "params": params,
+        }
+    ]
+
     return html_report_document(
         "Fleet Monitoring - Vue 2",
         [
-            build_kpi_params_list(params),
+            build_kpi_cards_section("KPI", kpi8_cards),
             f"<div class=\"section\"><h2>KPI 8 graph</h2>{figure_to_html_block(fig)}</div>",
             build_html_table_from_df(table_kpi8, "KPI 8 table"),
         ],
     )
 
 
-def kpi8_production_ytd(df: pd.DataFrame, country: str, year: int | str, asset_status: str, metric_mode: str) -> tuple[pd.DataFrame, str, str, str]:
-    subset = filter_base(df, country, year, status="ALL", bike_or_car="CAR")
-    subset = apply_status_filter(subset, asset_status)
+def kpi8_production_ytd(
+    df: pd.DataFrame,
+    country: str,
+    year: int | str,
+    asset_status: str = "ALL",
+    metric_mode: str = "volume",
+) -> tuple[pd.DataFrame, str, str, str]:
+    subset = filter_base(
+        df,
+        country,
+        year,
+        status="ALL",
+        bike_or_car="CAR",
+    ).copy()
 
-    power_col = pick_first_existing_column(subset, ["POWER_CATEGORY_3", "POWER_CATEGORY_2", "POWER_CATEGORY"])
-    if power_col is None:
-        return pd.DataFrame(), "", "", ""
+    if asset_status != "ALL":
+        subset = subset[subset["NOVA_ASSET_STATUS"] == asset_status]
 
-    subset = subset.copy()
-    start_dates = pd.to_datetime(subset["CONTRACT_START_DATE"], errors="coerce")
-    start_subset = subset[start_dates.dt.year == int(year)].copy()
-    if not start_subset.empty:
-        start_subset["MONTH"] = start_dates.loc[start_subset.index].dt.month
-        subset = start_subset
+    subset["CONTRACT_START_DATE"] = pd.to_datetime(subset["CONTRACT_START_DATE"], errors="coerce")
+    subset = subset[
+        (subset["CONTRACT_START_DATE"].dt.year == int(year))
+        & (subset["CONTRACT_START_DATE"].dt.month == subset["MONTH"])
+    ].copy()
 
-    subset = subset.dropna(subset=[power_col, "MONTH"])
-    if subset.empty:
-        return pd.DataFrame(), "", "", ""
+    grouped = (
+        subset.groupby(["YEAR", "MONTH", "POWER_CATEGORY_3"])
+        .size()
+        .reset_index(name="VOLUME")
+    )
 
-    subset[power_col] = subset[power_col].astype(str).str.upper()
-    subset["MONTH"] = subset["MONTH"].astype(int)
-    subset["YEAR"] = int(year)
-
-    grouped = subset.groupby(["YEAR", "MONTH", power_col]).size().reset_index(name="VOLUME")
     if grouped.empty:
         return pd.DataFrame(), "", "", ""
 
     table = (
-        grouped.pivot(index=["YEAR", "MONTH"], columns=power_col, values="VOLUME")
+        grouped.pivot(
+            index=["YEAR", "MONTH"],
+            columns="POWER_CATEGORY_3",
+            values="VOLUME",
+        )
         .fillna(0)
         .reset_index()
-        .sort_values(["YEAR", "MONTH"])
     )
 
     metric_cols = [c for c in table.columns if c not in ["YEAR", "MONTH"]]
@@ -1568,8 +1793,8 @@ app.layout = html.Div(
         dcc.Location(id="url"),
         html.Div(
             [
-                dcc.Link("Vue 1 - Main KPIs + KPI 7", href="/", className="nav-link"),
-                dcc.Link("Vue 2 - KPI 8", href="/vue-2", className="nav-link"),
+                dcc.Link("Main KPIs + Fuel", href="/", className="nav-link"),
+                dcc.Link("Production by Energy", href="/vue-2", className="nav-link"),
                 dcc.Link("Vue 3 - SUV", href="/vue-3", className="nav-link") if has_vehicle_type_temp else html.Span(),
                 dcc.Link("Vue 4 - Concentration Risk", href="/vue-4", className="nav-link"),
                 dcc.Link("Vue 5 - Concentration", href="/vue-5", className="nav-link"),
@@ -1589,8 +1814,8 @@ def view1_layout() -> html.Div:
         [
             html.Div(
                 [
-                    html.H1("Main kpis et KPI7."),
-                    html.P("KPI 1-6 are in fleet, KPI 7 can switch fleet order and volume share."),
+                    html.H1("Main KPIs et Fuel."),
+                    html.P("Lease and fuel indicators with fleet/order switch on fuel view."),
                 ],
                 className="hero",
             ),
@@ -1632,7 +1857,7 @@ def view1_layout() -> html.Div:
                 [
                     html.Div(
                         [
-                            html.Div("KPI 1 Lease time < 25 months", className="kpi-card-title"),
+                            html.Div("Lease time < 25 months", className="kpi-card-title"),
                             html.Div(
                                 [
                                     html.Div([html.Div("Country", className="filter-label"), dcc.Dropdown(id="kpi1-country-filter", options=country_options, value=None, placeholder="Select country", clearable=True)], className="card-filter-box"),
@@ -1647,7 +1872,7 @@ def view1_layout() -> html.Div:
                     ),
                     html.Div(
                         [
-                            html.Div("KPI 2 Lease time 25-30 months", className="kpi-card-title"),
+                            html.Div("Lease time 25-30 months", className="kpi-card-title"),
                             html.Div(
                                 [
                                     html.Div([html.Div("Country", className="filter-label"), dcc.Dropdown(id="kpi2-country-filter", options=country_options, value=None, placeholder="Select country", clearable=True)], className="card-filter-box"),
@@ -1662,7 +1887,7 @@ def view1_layout() -> html.Div:
                     ),
                     html.Div(
                         [
-                            html.Div("KPI 3 Diesel vs Non Diesel", className="kpi-card-title"),
+                            html.Div("Diesel vs Non Diesel", className="kpi-card-title"),
                             html.Div(
                                 [
                                     html.Div([html.Div("Country", className="filter-label"), dcc.Dropdown(id="kpi3-country-filter", options=country_options, value=None, placeholder="Select country", clearable=True)], className="card-filter-box"),
@@ -1677,7 +1902,7 @@ def view1_layout() -> html.Div:
                     ),
                     html.Div(
                         [
-                            html.Div("KPI 4 Hybrid Share", className="kpi-card-title"),
+                            html.Div("Hybrid Share", className="kpi-card-title"),
                             html.Div(
                                 [
                                     html.Div([html.Div("Country", className="filter-label"), dcc.Dropdown(id="kpi4-country-filter", options=country_options, value=None, placeholder="Select country", clearable=True)], className="card-filter-box"),
@@ -1692,7 +1917,7 @@ def view1_layout() -> html.Div:
                     ),
                     html.Div(
                         [
-                            html.Div("KPI 5 EV Share", className="kpi-card-title"),
+                            html.Div("EV Share", className="kpi-card-title"),
                             html.Div(
                                 [
                                     html.Div([html.Div("Country", className="filter-label"), dcc.Dropdown(id="kpi5-country-filter", options=country_options, value=None, placeholder="Select country", clearable=True)], className="card-filter-box"),
@@ -1707,7 +1932,7 @@ def view1_layout() -> html.Div:
                     ),
                     html.Div(
                         [
-                            html.Div("KPI 6 PV vs LCV", className="kpi-card-title"),
+                            html.Div("PV vs LCV", className="kpi-card-title"),
                             html.Div(
                                 [
                                     html.Div([html.Div("Country", className="filter-label"), dcc.Dropdown(id="kpi6-country-filter", options=country_options, value=None, placeholder="Select country", clearable=True)], className="card-filter-box"),
@@ -1731,7 +1956,7 @@ def view1_layout() -> html.Div:
                 [
                     html.Div(
                         [
-                            html.Div("KPI summary table", className="panel-title"),
+                            html.Div("Summary table", className="panel-title"),
                             html.Div(
                                 [
                                     html.Div(
@@ -1760,7 +1985,7 @@ def view1_layout() -> html.Div:
             html.Div(id="kpi-period-note", className="small-note"),
             html.Div(
                 [
-                    html.Div("KPI 7 - Fuel type", className="panel-title"),
+                    html.Div("Fuel type", className="panel-title"),
                     html.Div(
                         [
                             html.Div(
@@ -1855,8 +2080,8 @@ def view2_layout() -> html.Div:
         [
             html.Div(
                 [
-                    html.H1("Vue 2 - PA Order"),
-                    html.P("KPI 8 Production volume and % per vehicule category (YTD)."),
+                    html.H1("Production by energy"),
+                    html.P("Production volume and % per vehicule category (YTD)."),
                 ],
                 className="hero",
             ),
@@ -1913,7 +2138,7 @@ def view2_layout() -> html.Div:
             ),
             html.Div(
                 [
-                    html.Div("KPI 8 - Production volume and % per vehicule category (YTD)", className="panel-title"),
+                    html.Div("Production volume and % per vehicule category (YTD)", className="panel-title"),
                     dcc.Graph(id="v2-kpi8-graph", config={"displayModeBar": False}),
                     html.Div(id="v2-kpi8-table-wrap"),
                 ],
@@ -2393,18 +2618,33 @@ def update_kpi_cards(
         waiting_card = build_card_body("--", "Sélectionnez les filtres puis cliquez sur Actualiser.", "#9aa5b1")
         return waiting_card, waiting_card, waiting_card, waiting_card, waiting_card, waiting_card
 
-    kpi1 = kpi_lease_under_25(df, kpi1_country, kpi1_year, kpi1_month)
-    kpi2 = kpi_lease_25_30(df, kpi2_country, kpi2_year, kpi2_month)
+    metrics = get_view1_metrics_cached(
+        kpi1_country,
+        kpi1_year,
+        kpi1_month,
+        kpi2_country,
+        kpi2_year,
+        kpi2_month,
+        kpi3_country,
+        kpi3_year,
+        kpi3_month,
+        kpi4_country,
+        kpi4_year,
+        kpi4_month,
+        kpi5_country,
+        kpi5_year,
+        kpi5_month,
+        kpi6_country,
+        kpi6_year,
+        kpi6_month,
+    )
 
-    month3 = resolve_month_value(kpi3_country, kpi3_year, kpi3_month)
-    month4 = resolve_month_value(kpi4_country, kpi4_year, kpi4_month)
-    month5 = resolve_month_value(kpi5_country, kpi5_year, kpi5_month)
-    month6 = resolve_month_value(kpi6_country, kpi6_year, kpi6_month)
-
-    diesel_share, non_diesel_share = kpi_diesel_non_diesel(df, kpi3_country, kpi3_year, month3)
-    hybrid_share = kpi_hybrid_share(df, kpi4_country, kpi4_year, month4)
-    ev_share = kpi_ev_share(df, kpi5_country, kpi5_year, month5)
-    pv_share, lcv_share = kpi_pv_lcv(df, kpi6_country, kpi6_year, month6)
+    kpi1 = cast(float | None, metrics["kpi1"])
+    kpi2 = cast(float | None, metrics["kpi2"])
+    diesel_share, non_diesel_share = cast(tuple[float | None, float | None], metrics["diesel_non"])
+    hybrid_share = cast(float | None, metrics["hybrid"])
+    ev_share = cast(float | None, metrics["ev"])
+    pv_share, lcv_share = cast(tuple[float | None, float | None], metrics["pv_lcv"])
 
     card1 = build_card_body(percent_or_na(kpi1), "Goal: no more than 5% of the current fleet.", "#1d5f99")
     card2 = build_card_body(percent_or_na(kpi2), "Goal: no more than 10% of the current fleet.", "#2f855a")
@@ -2432,13 +2672,14 @@ def update_kpi_cards(
 def update_kpi7(_refresh_clicks: int, _kpi7_refresh_clicks: int, country: str, start_date: str | None, end_date: str | None, status_group: str, metric_mode: str, period_mode: str):
     if has_missing_filters(country, status_group, metric_mode, period_mode):
         empty_fig = go.Figure()
-        empty_fig.update_layout(title="KPI 7 - Sélectionnez les filtres puis cliquez sur Actualiser")
+        empty_fig.update_layout(title="Sélectionnez les filtres puis cliquez sur Actualiser")
         return empty_fig, html.Div("Sélectionnez les filtres puis cliquez sur Actualiser.", className="small-note")
 
-    pivot, y_title, x_title, period_label = kpi7_fuel_by_period(df, country, status_group, metric_mode, period_mode, start_date, end_date)
+    pivot, y_title, x_title, period_label = get_kpi7_cached(country, start_date, end_date, status_group, metric_mode, period_mode)
+    pivot = pivot.copy()
     title_mode = "Share" if metric_mode == "share" else "Volume"
     country_label = country if country != "ALL" else "All countries"
-    title = f"KPI 7 - {title_mode} of fuel type ({period_label}, {country_label}, {status_group})"
+    title = f"{title_mode} of fuel type ({period_label}, {country_label}, {status_group})"
 
     fig = figure_from_pivot(pivot, y_title, x_title, title)
 
@@ -2524,69 +2765,40 @@ def update_kpi_summary(
     if has_missing_filters(*required_filters):
         return html.Div("Sélectionnez les filtres puis cliquez sur Actualiser.", className="small-note")
 
-    month3 = resolve_month_value(kpi3_country, kpi3_year, kpi3_month)
-    month4 = resolve_month_value(kpi4_country, kpi4_year, kpi4_month)
-    month5 = resolve_month_value(kpi5_country, kpi5_year, kpi5_month)
-    month6 = resolve_month_value(kpi6_country, kpi6_year, kpi6_month)
-    month1 = None if kpi1_month in (None, "ALL") else int(kpi1_month)
-    month2 = None if kpi2_month in (None, "ALL") else int(kpi2_month)
+    metrics = get_view1_metrics_cached(
+        kpi1_country,
+        kpi1_year,
+        kpi1_month,
+        kpi2_country,
+        kpi2_year,
+        kpi2_month,
+        kpi3_country,
+        kpi3_year,
+        kpi3_month,
+        kpi4_country,
+        kpi4_year,
+        kpi4_month,
+        kpi5_country,
+        kpi5_year,
+        kpi5_month,
+        kpi6_country,
+        kpi6_year,
+        kpi6_month,
+    )
 
-    kpi1_base = df[
-        (df["COUNTRY"] == kpi1_country)
-        & (df["YEAR"] == int(kpi1_year))
-        & (df["NOVA_ASSET_STATUS"] == "IN FLEET")
-        & (df["BIKE_OR_CAR"] == "CAR")
-    ].copy()
-    if month1 is not None:
-        kpi1_base = kpi1_base[kpi1_base["MONTH"] == month1].copy()
+    month3 = cast(int, metrics["month3"])
+    month4 = cast(int, metrics["month4"])
+    month5 = cast(int, metrics["month5"])
+    month6 = cast(int, metrics["month6"])
+    month1 = cast(int | None, metrics["month1"])
+    month2 = cast(int | None, metrics["month2"])
 
-    kpi2_base = df[
-        (df["COUNTRY"] == kpi2_country)
-        & (df["YEAR"] == int(kpi2_year))
-        & (df["NOVA_ASSET_STATUS"] == "IN FLEET")
-        & (df["BIKE_OR_CAR"] == "CAR")
-    ].copy()
-    if month2 is not None:
-        kpi2_base = kpi2_base[kpi2_base["MONTH"] == month2].copy()
-
-    month3_base = df[
-        (df["COUNTRY"] == kpi3_country)
-        & (df["YEAR"] == int(kpi3_year))
-        & (df["MONTH"] == int(month3))
-        & (df["NOVA_ASSET_STATUS"] == "IN FLEET")
-        & (df["BIKE_OR_CAR"] == "CAR")
-    ].copy()
-
-    month4_base = df[
-        (df["COUNTRY"] == kpi4_country)
-        & (df["YEAR"] == int(kpi4_year))
-        & (df["MONTH"] == int(month4))
-        & (df["NOVA_ASSET_STATUS"] == "IN FLEET")
-        & (df["BIKE_OR_CAR"] == "CAR")
-    ].copy()
-
-    month5_base = df[
-        (df["COUNTRY"] == kpi5_country)
-        & (df["YEAR"] == int(kpi5_year))
-        & (df["MONTH"] == int(month5))
-        & (df["NOVA_ASSET_STATUS"] == "IN FLEET")
-        & (df["BIKE_OR_CAR"] == "CAR")
-    ].copy()
-
-    month6_base = df[
-        (df["COUNTRY"] == kpi6_country)
-        & (df["YEAR"] == int(kpi6_year))
-        & (df["MONTH"] == int(month6))
-        & (df["NOVA_ASSET_STATUS"] == "IN FLEET")
-        & (df["BIKE_OR_CAR"] == "CAR")
-    ].copy()
-
-    kpi1_val = kpi_lease_under_25(df, kpi1_country, kpi1_year, kpi1_month)
-    kpi2_val = kpi_lease_25_30(df, kpi2_country, kpi2_year, kpi2_month)
-    diesel_non = kpi_diesel_non_diesel(df, kpi3_country, kpi3_year, month3)
-    hybrid_val = kpi_hybrid_share(df, kpi4_country, kpi4_year, month4)
-    ev_val = kpi_ev_share(df, kpi5_country, kpi5_year, month5)
-    pv_lcv_val = kpi_pv_lcv(df, kpi6_country, kpi6_year, month6)
+    kpi1_val = cast(float | None, metrics["kpi1"])
+    kpi2_val = cast(float | None, metrics["kpi2"])
+    diesel_non = cast(tuple[float | None, float | None], metrics["diesel_non"])
+    hybrid_val = cast(float | None, metrics["hybrid"])
+    ev_val = cast(float | None, metrics["ev"])
+    pv_lcv_val = cast(tuple[float | None, float | None], metrics["pv_lcv"])
 
     period3 = summary_month_label(kpi3_year, month3)
     period4 = summary_month_label(kpi4_year, month4)
@@ -2602,7 +2814,7 @@ def update_kpi_summary(
             "period": f"{kpi1_country} / {period1}",
             "result_text": percent_or_na(kpi1_val),
             "signal": kpi_limit_status(kpi1_val, kpi1_limit),
-            "volume": len(kpi1_base),
+            "volume": cast(int, metrics["kpi1_volume"]),
             "unit": "%",
             "comment": f"Limit is {kpi1_limit_text}",
         },
@@ -2611,7 +2823,7 @@ def update_kpi_summary(
             "period": f"{kpi2_country} / {period2}",
             "result_text": percent_or_na(kpi2_val),
             "signal": kpi_limit_status(kpi2_val, kpi2_limit),
-            "volume": len(kpi2_base),
+            "volume": cast(int, metrics["kpi2_volume"]),
             "unit": "%",
             "comment": f"Limit is {kpi2_limit_text}",
         },
@@ -2620,7 +2832,7 @@ def update_kpi_summary(
             "period": f"{kpi3_country} / {period3}",
             "result_text": f"{percent_or_na(diesel_non[0])} DI & {percent_or_na(diesel_non[1])} Non DI" if diesel_non[0] is not None else "N/A",
             "signal": "neutral",
-            "volume": len(month3_base),
+            "volume": cast(int, metrics["kpi3_volume"]),
             "unit": "%",
             "comment": "Total current fleet",
         },
@@ -2629,7 +2841,7 @@ def update_kpi_summary(
             "period": f"{kpi4_country} / {period4}",
             "result_text": percent_or_na(hybrid_val),
             "signal": "neutral",
-            "volume": len(month4_base),
+            "volume": cast(int, metrics["kpi4_volume"]),
             "unit": "%",
             "comment": "Hyb is within Non-DI share. Total current fleet",
         },
@@ -2638,7 +2850,7 @@ def update_kpi_summary(
             "period": f"{kpi5_country} / {period5}",
             "result_text": percent_or_na(ev_val),
             "signal": "neutral",
-            "volume": len(month5_base),
+            "volume": cast(int, metrics["kpi5_volume"]),
             "unit": "%",
             "comment": "EV is within Non-DI share. Total current fleet",
         },
@@ -2647,7 +2859,7 @@ def update_kpi_summary(
             "period": f"{kpi6_country} / {period6}",
             "result_text": f"{percent_or_na(pv_lcv_val[0])} PV & {percent_or_na(pv_lcv_val[1])} LCV" if pv_lcv_val[0] is not None else "N/A",
             "signal": "neutral",
-            "volume": len(month6_base),
+            "volume": cast(int, metrics["kpi6_volume"]),
             "unit": "%",
             "comment": "Total current fleet",
         },
@@ -2837,12 +3049,13 @@ def download_view2_html(_n_clicks: int, country: str, year: int | str, asset_sta
 def update_view2_kpi8(_refresh_clicks: int, country: str, year: int | str, asset_status: str, metric_mode: str):
     if has_missing_filters(country, year, asset_status, metric_mode):
         empty_fig = go.Figure()
-        empty_fig.update_layout(title="KPI 8 - Sélectionnez les filtres puis cliquez sur Actualiser")
+        empty_fig.update_layout(title="Sélectionnez les filtres puis cliquez sur Actualiser")
         return empty_fig, html.Div("Sélectionnez les filtres puis cliquez sur Actualiser.", className="small-note")
 
-    table_kpi8, y_title, x_title, period_label = kpi8_production_ytd(df, country, year, asset_status, metric_mode)
+    table_kpi8, y_title, x_title, period_label = get_kpi8_cached(country, year, asset_status, metric_mode)
+    table_kpi8 = table_kpi8.copy()
     title_mode = "Share" if metric_mode == "share" else "Volume"
-    title = f"KPI 8 - {title_mode} per vehicule category ({period_label})"
+    title = f"{title_mode} per vehicule category ({period_label})"
 
     fig = go.Figure()
     if not table_kpi8.empty:
@@ -2878,7 +3091,7 @@ def update_view2_kpi8(_refresh_clicks: int, country: str, year: int | str, asset
         table_kpi8 = pd.concat([table_kpi8, pd.DataFrame([total_row])], ignore_index=True)
 
     table = build_table(table_kpi8, page_size=15)
-    return fig, html.Div([html.H4("KPI 8 table (pivot)", className="panel-title"), table])
+    return fig, html.Div([html.H4("Production table (pivot)", className="panel-title"), table])
 
 
 @app.callback(
