@@ -1222,12 +1222,15 @@ def build_kpi7_table_with_total(
                     lambda value: str(int(float(value))) if pd.notna(value) and value != "N/A" else "N/A"
                 )
             else:
-                table_df.loc[~total_mask, column] = table_df.loc[~total_mask, column].map(
+                # Use an object-typed intermediary to safely mix percent strings and numeric totals.
+                display_col = table_df[column].astype("object")
+                display_col.loc[~total_mask] = table_df.loc[~total_mask, column].map(
                     lambda value: percent_or_na_precision(cast(float | None, value), 1) if pd.notna(value) else "N/A"
                 )
-                table_df.loc[total_mask, column] = table_df.loc[total_mask, column].map(
+                display_col.loc[total_mask] = table_df.loc[total_mask, column].map(
                     lambda value: str(int(float(value))) if pd.notna(value) and value != "N/A" else "N/A"
                 )
+                table_df[column] = display_col
     else:
         for column in [c for c in table_df.columns if c != "Fuel type"]:
             table_df[column] = table_df[column].map(lambda value: str(int(float(value))) if pd.notna(value) and value != "N/A" else "N/A")
