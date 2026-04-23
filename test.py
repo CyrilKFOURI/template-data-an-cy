@@ -233,6 +233,15 @@ def percent_or_na_precision(value: float | None, decimals: int) -> str:
     return f"{value:.{decimals}f}%"
 
 
+def format_volume(value: float | int | str | None) -> str:
+    if value is None or pd.isna(value) or value == "N/A":
+        return "N/A"
+    try:
+        return f"{int(float(value)):,}".replace(",", " ")
+    except Exception:
+        return str(value)
+
+
 def html_logo_block(class_name: str = "report-logo") -> str:
     return f'<img class="{class_name}" src="{LOGO_PATH}" alt="Fleet Monitoring logo" />'
 
@@ -744,7 +753,7 @@ def render_kpi_summary_table(rows: list[dict[str, object]]) -> dash_table.DataTa
                 "Country": str(row["country"]),
                 "Period": str(row["period"]),
                 "Result": result_value,
-                "Volume": int(cast(Any, row["volume"])),
+                "Volume": format_volume(row["volume"]),
                 "Unit": str(row["unit"]),
                 "Comment": str(row["comment"]),
             }
@@ -874,7 +883,7 @@ def figure_from_pivot(pivot: pd.DataFrame, y_title: str, x_title: str, title: st
         return fig
 
     x_values = pivot.columns.tolist()
-    muted_palette = ["#5DADE2", "#76D7C4", "#F8B195", "#FFD700", "#FFD3B6", "#FFAAA5", "#AA96DA"]
+    muted_palette = ["#e6194B", "#3cb44b", "#ffe119", "#4363d8", "#f58231", "#911eb4", "#46f0f0", "#f032e6"]
     for index, fuel in enumerate(pivot.index):
         color = muted_palette[index % len(muted_palette)]
         fig.add_trace(
@@ -889,10 +898,9 @@ def figure_from_pivot(pivot: pd.DataFrame, y_title: str, x_title: str, title: st
             go.Scatter(
                 x=x_values,
                 y=pivot.loc[fuel].tolist(),
-                mode="lines+markers",
+                mode="lines",
                 showlegend=False,
-                line={"color": color, "width": 2.2},
-                marker={"color": color, "size": 7},
+                line={"color": color, "width": 2.2, "dash": "dot"},
             )
         )
 
@@ -1009,13 +1017,13 @@ def html_report_document(title: str, sections: list[str]) -> str:
         .report-title {{ margin: 0; font-size: 30px; line-height: 1.1; }}
         .report-subtitle {{ margin: 0; color: var(--muted); font-size: 13px; }}
         .kpi-cards-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; margin-top: 14px; }}
-        .kpi-result-card {{ background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px 12px 10px; box-shadow: 0 6px 18px rgba(16, 42, 67, 0.04); }}
-        .kpi-card-top {{ display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; margin-bottom: 10px; text-align: center; }}
-        .kpi-title {{ font-size: 14px; font-weight: 800; color: var(--ink); letter-spacing: 0.05em; text-transform: uppercase; line-height: 1.1; }}
+        .kpi-result-card {{ background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px 16px 14px; box-shadow: 0 6px 18px rgba(16, 42, 67, 0.04); display: flex; flex-direction: column; height: 100%; box-sizing: border-box; }}
+        .kpi-card-top {{ display: flex; flex-direction: column; align-items: center; justify-content: flex-start; gap: 14px; margin-bottom: 14px; text-align: center; width: 100%; }}
+        .kpi-title {{ font-size: 14px; font-weight: 800; color: var(--ink); letter-spacing: 0.05em; text-transform: uppercase; line-height: 1.1; width: 100%; padding-bottom: 12px; border-bottom: 1px solid var(--line-soft); }}
         .kpi-result-value {{ font-size: 26px; font-weight: 800; color: #163e63; line-height: 1.05; display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 0; width: 100%; }}
         .kpi-result-value .kpi-value-text {{ color: #163e63; }}
         .status-dot {{ width: 10px; height: 10px; border-radius: 999px; flex: 0 0 auto; display: inline-block; }}
-        .kpi-meta-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 14px; margin-top: 10px; }}
+        .kpi-meta-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 14px; margin-top: auto; padding-top: 12px; }}
         .kpi-meta-column {{ display: flex; flex-direction: column; gap: 6px; }}
         .kpi-meta-line {{ display: flex; justify-content: space-between; gap: 10px; font-size: 11px; color: var(--muted); line-height: 1.25; }}
         .kpi-meta-key {{ font-weight: 700; color: var(--ink); white-space: nowrap; }}
@@ -1164,8 +1172,10 @@ def build_html_table_from_df(df_table: pd.DataFrame, title: str) -> str:
             total_row = {table_df.columns[0]: "<strong>TOTAL</strong>"}
             for col in numeric_cols:
                 try:
-                    total = pd.to_numeric(table_df[col].astype(str).str.replace('%', '').str.replace(',', '.'), errors='coerce').sum()
-                    total_row[col] = f"<strong>{total:,.0f}</strong>"
+                    # Clean the spaces we introduced for volumes
+                    clean_str = table_df[col].astype(str).str.replace(' ', '').str.replace('%', '').str.replace(',', '.')
+                    total = pd.to_numeric(clean_str, errors='coerce').sum()
+                    total_row[col] = f"<strong>{format_volume(total)}</strong>"
                 except:
                     total_row[col] = "<strong>-</strong>"
             
@@ -1219,7 +1229,7 @@ def build_kpi7_table_with_total(
         for column in [c for c in table_df.columns if c != "Fuel type"]:
             if column == "TOTAL":
                 table_df[column] = table_df[column].map(
-                    lambda value: str(int(float(value))) if pd.notna(value) and value != "N/A" else "N/A"
+                    lambda value: format_volume(value)
                 )
             else:
                 # Use an object-typed intermediary to safely mix percent strings and numeric totals.
@@ -1228,12 +1238,12 @@ def build_kpi7_table_with_total(
                     lambda value: percent_or_na_precision(cast(float | None, value), 1) if pd.notna(value) else "N/A"
                 )
                 display_col.loc[total_mask] = table_df.loc[total_mask, column].map(
-                    lambda value: str(int(float(value))) if pd.notna(value) and value != "N/A" else "N/A"
+                    lambda value: format_volume(value)
                 )
                 table_df[column] = display_col
     else:
         for column in [c for c in table_df.columns if c != "Fuel type"]:
-            table_df[column] = table_df[column].map(lambda value: str(int(float(value))) if pd.notna(value) and value != "N/A" else "N/A")
+            table_df[column] = table_df[column].map(lambda value: format_volume(value))
 
     return table_df
 
@@ -1256,7 +1266,7 @@ def build_view2_table_with_total(table_df: pd.DataFrame, metric_mode: str) -> pd
             display_df["TOTAL"] = display_df["TOTAL"].map(lambda value: str(round(float(value), 1)) if pd.notna(value) and value != "N/A" else "N/A")
     else:
         for column in metric_cols + (["TOTAL"] if "TOTAL" in display_df.columns else []):
-            display_df[column] = display_df[column].map(lambda value: str(int(value)) if pd.notna(value) and value != "N/A" else "N/A")
+            display_df[column] = display_df[column].map(lambda value: format_volume(value))
 
     return display_df
 
@@ -1356,7 +1366,7 @@ def build_view1_download_report(
             "country": kpi1_country,
             "period": summary_month_label(kpi1_year, None if kpi1_month in (None, 'ALL') else int(kpi1_month)),
             "result": percent_or_na_precision(kpi1_val, 2),
-            "volume": kpi1_volume,
+            "volume": format_volume(kpi1_volume),
             "signal": kpi_limit_status(kpi1_val, kpi1_limit),
         },
         {
@@ -1365,7 +1375,7 @@ def build_view1_download_report(
             "country": kpi2_country,
             "period": summary_month_label(kpi2_year, None if kpi2_month in (None, 'ALL') else int(kpi2_month)),
             "result": percent_or_na_precision(kpi2_val, 2),
-            "volume": kpi2_volume,
+            "volume": format_volume(kpi2_volume),
             "signal": kpi_limit_status(kpi2_val, kpi2_limit),
         },
         {
@@ -1374,7 +1384,7 @@ def build_view1_download_report(
             "country": kpi3_country,
             "period": summary_month_label(kpi3_year, month3),
             "result": f"{percent_or_na_precision(diesel_non[0], 2)} DI & {percent_or_na_precision(diesel_non[1], 2)} non-DI" if diesel_non[0] is not None else "N/A",
-            "volume": kpi3_volume,
+            "volume": format_volume(kpi3_volume),
             "signal": "neutral",
         },
         {
@@ -1383,7 +1393,7 @@ def build_view1_download_report(
             "country": kpi4_country,
             "period": summary_month_label(kpi4_year, month4),
             "result": percent_or_na_precision(hybrid_val, 2),
-            "volume": kpi4_volume,
+            "volume": format_volume(kpi4_volume),
             "signal": "neutral",
         },
         {
@@ -1392,7 +1402,7 @@ def build_view1_download_report(
             "country": kpi5_country,
             "period": summary_month_label(kpi5_year, month5),
             "result": percent_or_na_precision(ev_val, 2),
-            "volume": kpi5_volume,
+            "volume": format_volume(kpi5_volume),
             "signal": "neutral",
         },
         {
@@ -1401,7 +1411,7 @@ def build_view1_download_report(
             "country": kpi6_country,
             "period": summary_month_label(kpi6_year, month6),
             "result": f"{percent_or_na_precision(pv_lcv_val[0], 2)} PV & {percent_or_na_precision(pv_lcv_val[1], 2)} LCV" if pv_lcv_val[0] is not None else "N/A",
-            "volume": kpi6_volume,
+            "volume": format_volume(kpi6_volume),
             "signal": "neutral",
         },
     ]
@@ -1420,7 +1430,7 @@ def build_view1_download_report(
                 ("Period", summary_month_label(kpi1_year, None if kpi1_month in (None, "ALL") else int(kpi1_month))),
                 ("Vehicle type", kpi_common_bike_or_car),
                 ("Asset status", "IN FLEET"),
-                ("Volume", kpi1_volume),
+                ("Volume", format_volume(kpi1_volume)),
                 ("Limit", "5%" if kpi1_limit is None else f"{kpi1_limit}%"),
             ],
         },
@@ -1434,7 +1444,7 @@ def build_view1_download_report(
                 ("Period", summary_month_label(kpi2_year, None if kpi2_month in (None, "ALL") else int(kpi2_month))),
                 ("Vehicle type", kpi_common_bike_or_car),
                 ("Asset status", "IN FLEET"),
-                ("Volume", kpi2_volume),
+                ("Volume", format_volume(kpi2_volume)),
                 ("Limit", "10%" if kpi2_limit is None else f"{kpi2_limit}%"),
             ],
         },
@@ -1447,7 +1457,7 @@ def build_view1_download_report(
                 ("Period", summary_month_label(kpi3_year, month3)),
                 ("Vehicle type", kpi_common_bike_or_car),
                 ("Asset status", "IN FLEET"),
-                ("Volume", kpi3_volume)
+                ("Volume", format_volume(kpi3_volume))
             ],
         },
         {
@@ -1459,7 +1469,7 @@ def build_view1_download_report(
                 ("Period", summary_month_label(kpi4_year, month4)),
                 ("Vehicle type", kpi_common_bike_or_car),
                 ("Asset status", "IN FLEET"),
-                ("Volume", kpi4_volume)
+                ("Volume", format_volume(kpi4_volume))
             ],
         },
         {
@@ -1471,7 +1481,7 @@ def build_view1_download_report(
                 ("Period", summary_month_label(kpi5_year, month5)),
                 ("Vehicle type", kpi_common_bike_or_car),
                 ("Asset status", "IN FLEET"),
-                ("Volume", kpi5_volume)
+                ("Volume", format_volume(kpi5_volume))
             ],
         },
         {
@@ -1483,7 +1493,7 @@ def build_view1_download_report(
                 ("Period", summary_month_label(kpi6_year, month6)),
                 ("Vehicle type", kpi_common_bike_or_car),
                 ("Asset status", "IN FLEET"),
-                ("Volume", kpi6_volume)
+                ("Volume", format_volume(kpi6_volume))
             ],
         },
     ]
@@ -1516,7 +1526,7 @@ def build_view2_download_report(
     if not table_kpi8.empty:
         x_values = table_kpi8["MONTH"].tolist()
         metric_cols = [c for c in table_kpi8.columns if c not in ["YEAR", "MONTH"]]
-        muted_palette = ["#5DADE2", "#76D7C4", "#F8B195", "#FFD700", "#FFD3B6", "#FFAAA5", "#AA96DA"]
+        muted_palette = ["#e6194B", "#3cb44b", "#ffe119", "#4363d8", "#f58231", "#911eb4", "#46f0f0", "#f032e6"]
         for index, col in enumerate(metric_cols):
             color = muted_palette[index % len(muted_palette)]
             fig.add_trace(
@@ -1558,19 +1568,13 @@ def build_view2_download_report(
         for column in metric_cols:
             table_kpi8[column] = table_kpi8[column].map(lambda value: percent_or_na_precision(cast(float | None, value), 1) if pd.notna(value) else "N/A")
 
-    kpi8_cards = [
-        {
-            "label": f"Fuel type {title_mode}",
-            "result": "",
-            "params": params,
-            "status": "neutral",
-        }
-    ]
+    params_str = " | ".join([f"{k}: {v}" for k, v in params])
+    summary_text = f"<p class=\"muted\"><strong>Parameters:</strong> {params_str}</p>"
 
     return html_report_document(
         f"Fleet Monitoring - View 2 - Fuel type {title_mode}",
         [
-            build_kpi_cards_section(f"Fuel type {title_mode}", kpi8_cards),
+            f"<div class=\"section\"><h2>Fuel type {title_mode}</h2>{summary_text}</div>",
             f"<div class=\"section\"><h2>Fuel type {title_mode} by {x_title.lower()}</h2>{figure_to_html_block(fig)}</div>",
             build_html_table_from_df(
                 format_view2_table_for_display(build_view2_table_with_total(table_kpi8, metric_mode)),
@@ -3515,7 +3519,7 @@ def update_view2_kpi8(_refresh_clicks: int, country: str, year: int | str, metri
     if not table_kpi8.empty:
         x_values = table_kpi8["MONTH"].tolist()
         metric_cols = [c for c in table_kpi8.columns if c not in ["YEAR", "MONTH"]]
-        muted_palette = ["#5DADE2", "#76D7C4", "#F8B195", "#FFD700", "#FFD3B6", "#FFAAA5", "#AA96DA"]
+        muted_palette = ["#e6194B", "#3cb44b", "#ffe119", "#4363d8", "#f58231", "#911eb4", "#46f0f0", "#f032e6"]
         for index, col in enumerate(metric_cols):
             color = muted_palette[index % len(muted_palette)]
             fig.add_trace(
