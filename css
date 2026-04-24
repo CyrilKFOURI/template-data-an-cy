@@ -51,16 +51,23 @@ body {
 
 .filter-bar {
     display: grid;
-    grid-template-columns: repeat(4, minmax(180px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
     gap: 14px;
     margin-bottom: 18px;
 }
 
 .filter-box {
     background: #ffffff;
-    padding: 14px 16px;
-    border-radius: 16px;
-    box-shadow: 0 8px 24px rgba(16, 42, 67, 0.08);
+    padding: 10px 14px;
+    border-radius: 14px;
+    box-shadow: 0 4px 16px rgba(16, 42, 67, 0.06);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 8px;
+}
+.filter-box > div {
+    width: 100%;
 }
 
 .card-filter-bar {
@@ -119,9 +126,10 @@ body {
     font-size: 12px;
     font-weight: 700;
     color: #52616b;
-    margin-bottom: 8px;
+    margin-bottom: 0;
     text-transform: uppercase;
     letter-spacing: 0.08em;
+    width: 100%;
 }
 
 .cards-grid {
@@ -204,10 +212,75 @@ body {
 }
 
 .controls-inline {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(220px, 1fr));
+    display: flex;
+    flex-wrap: nowrap;
     gap: 12px;
-    margin-bottom: 14px;
+    margin-bottom: 18px;
+    align-items: stretch;
+}
+
+.controls-inline .filter-box {
+    background: #ffffff;
+    padding: 10px 14px;
+    border-radius: 12px;
+    box-shadow: 0 4px 12px rgba(16, 42, 67, 0.05);
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-start;
+    gap: 8px;
+    flex: 1 1 0;
+    min-width: 0;
+}
+
+.controls-inline .filter-box:nth-child(2) {
+    flex: 1.2 1 0;
+}
+
+.controls-inline .filter-box:nth-child(3),
+.controls-inline .filter-box:nth-child(4) {
+    flex: 0.7 1 0;
+}
+
+.controls-inline .filter-box:last-child {
+    flex: 0.8 1 0;
+    min-width: auto;
+    justify-content: flex-start;
+}
+
+.controls-inline .filter-label {
+    font-size: 11px;
+    margin-bottom: 0;
+    color: #52616b;
+    width: 100%;
+}
+
+.controls-inline .primary-button {
+    height: 32px !important;
+    flex: 0 0 auto !important;
+    padding: 0 16px;
+}
+
+.controls-inline .DateInput {
+    width: 82px !important;
+}
+
+.controls-inline .DateInput_input {
+    font-size: 11px !important;
+    padding: 6px 4px !important;
+    text-align: center;
+}
+
+.controls-inline .DateRangePickerInput_arrow {
+    width: 16px;
+    padding: 0;
+}
+
+.controls-inline .dash-dropdown {
+    font-size: 11px;
+}
+
+.controls-inline .dash-radioitems label {
+    margin-right: 6px !important;
 }
 
 .small-note {
@@ -217,26 +290,36 @@ body {
 }
 
 .primary-button {
-    background: linear-gradient(135deg, #102a43 0%, #1d5f99 100%);
+    background: #102a43;
     color: #ffffff;
-    border: none;
-    border-radius: 10px;
-    padding: 8px 12px;
-    font-weight: 700;
+    border: 1px solid #102a43;
+    border-radius: 8px;
+    padding: 0 4px;
+    height: 42px;
+    font-size: 11px;
+    font-weight: 600;
     cursor: pointer;
-    transition: transform 0.08s ease, filter 0.16s ease, box-shadow 0.16s ease;
-    box-shadow: 0 8px 18px rgba(16, 42, 67, 0.2);
+    transition: all 0.15s ease-in-out;
+    box-shadow: 0 2px 6px rgba(16, 42, 67, 0.12);
+    flex: 1 1 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0;
 }
 
 .primary-button:hover {
-    filter: brightness(1.08);
-    box-shadow: 0 11px 22px rgba(16, 42, 67, 0.28);
+    background: #193b59;
+    border-color: #193b59;
+    box-shadow: 0 4px 12px rgba(16, 42, 67, 0.18);
+    transform: translateY(-1px);
 }
 
 .primary-button:active {
-    transform: translateY(1px) scale(0.995);
-    filter: brightness(0.95);
-    box-shadow: 0 4px 10px rgba(16, 42, 67, 0.2);
+    background: #0b1d2e;
+    border-color: #0b1d2e;
+    transform: translateY(1px);
+    box-shadow: 0 1px 2px rgba(16, 42, 67, 0.1);
 }
 
 @media (max-width: 1100px) {
