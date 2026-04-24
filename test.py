@@ -56,13 +56,15 @@ COLUMNS_TO_READ = [
 ]
 
 FUEL_COLOR_SEQUENCE = [
-    "#d98943",
-    "#8d97a1",
-    "#b08b2f",
-    "#e5dcb8",
-    "#2f7f5f",
-    "#35557d",
-    "#b24f4f",
+    "#2c3e50", # Diesel (Priority 0) - Dark Slate
+    "#e67e22", # Petrol (Priority 1) - Orange
+    "#f1c40f", # HEV (Priority 2) - Yellow/Gold
+    "#2ecc71", # PHEV (Priority 3) - Emerald Green
+    "#16a085", # BEV (Priority 4) - Teal
+    "#3498db", # Blue
+    "#8e44ad", # Purple
+    "#d35400", # Dark Orange
+    "#7f8c8d", # Grey
 ]
 
 
@@ -970,7 +972,7 @@ def figure_from_pivot(pivot: pd.DataFrame, y_title: str, x_title: str, title: st
         barmode="group",
         xaxis_title=x_title,
         yaxis_title=y_title,
-        legend_title_text="Fuel type",
+        legend_title_text="Fuel Type",
         height=520,
         template="plotly_white",
     )
@@ -1143,23 +1145,34 @@ def html_report_document(title: str, sections: list[str]) -> str:
 
 
 def build_kpi7_metadata_section(
+    country: str,
     status_group: str,
+    metric_mode: str,
+    period_mode: str,
     bike_or_car: str,
     start_date: str | None,
     end_date: str | None,
     figure: go.Figure,
 ) -> str:
-    """Build a simple KPI 7 metadata section with date range only."""
+    """Build a simple KPI 7 metadata section with refined title structure."""
     if start_date and end_date:
-        date_range_text = f"Dataset: {start_date} to {end_date}"
+        date_text = f"{start_date} to {end_date}"
     else:
         min_cob = df["COB_DATE"].min()
         max_cob = df["COB_DATE"].max()
         min_str = min_cob.strftime("%Y-%m-%d") if pd.notna(min_cob) else "N/A"
         max_str = max_cob.strftime("%Y-%m-%d") if pd.notna(max_cob) else "N/A"
-        date_range_text = f"Dataset: {min_str} to {max_str}"
+        date_text = f"{min_str} to {max_str}"
+
+    title_mode = "Share" if metric_mode == "share" else "Volume"
+    main_title = f"Fuel Type {title_mode.lower()} - {status_group} - {title_mode} - {period_mode.capitalize()}"
+    subtitle = f"{country} | {date_text} | {bike_or_car}"
     
-    return f"<div class=\"section\"><h2>Fuel type share</h2><p class=\"muted\">{html_escape(date_range_text)}</p>{figure_to_html_block(figure)}</div>"
+    # Remove figure title for report to avoid redundancy with section headers
+    figure_copy = go.Figure(figure)
+    figure_copy.update_layout(title=None, margin=dict(t=30))
+    
+    return f"<div class=\"section\"><h2>{html_escape(main_title)}</h2><p class=\"muted\">{html_escape(subtitle)}</p>{figure_to_html_block(figure_copy)}</div>"
 
 
 def build_kpi_cards_section(title: str, cards: list[dict[str, object]]) -> str:
@@ -1433,11 +1446,16 @@ def build_view1_download_report(
     else:
         kpi7_period_title = "yearly"
 
+    if kpi7_start_date and kpi7_end_date:
+        date_info = f" from {kpi7_start_date} to {kpi7_end_date}"
+    else:
+        date_info = ""
+
     kpi7_fig = figure_from_pivot(
         kpi7_pivot,
         y_title7,
         x_title7,
-        f"Fuel type {'share' if kpi7_metric_mode == 'share' else 'volume'} {kpi7_period_title}<br><sup>{kpi7_country} | {kpi7_status_group} | {kpi7_bike_or_car}</sup>",
+        f"Fuel Type {'share' if kpi7_metric_mode == 'share' else 'volume'} {kpi7_period_title}{date_info}<br><sup>{kpi7_country} | {kpi7_status_group} | {kpi7_bike_or_car}</sup>",
     )
 
     kpi1_volume = kpi_selected_volume(df, kpi1_country, kpi1_year, kpi1_month, status="IN FLEET", bike_or_car=kpi_common_bike_or_car)
@@ -1593,10 +1611,10 @@ def build_view1_download_report(
         [
             build_kpi_cards_section("Main KPIs", kpi_cards),
             build_html_table_from_df(summary_df, "KPI summary table"),
-            build_kpi7_metadata_section(kpi7_status_group, kpi7_bike_or_car, kpi7_start_date, kpi7_end_date, kpi7_fig),
+            build_kpi7_metadata_section(kpi7_country, kpi7_status_group, kpi7_metric_mode, kpi7_period_mode, kpi7_bike_or_car, kpi7_start_date, kpi7_end_date, kpi7_fig),
             build_html_table_from_df(
                 build_kpi7_table_with_total(kpi7_pivot, kpi7_metric_mode, kpi7_country, kpi7_status_group, kpi7_period_mode, kpi7_bike_or_car, kpi7_start_date, kpi7_end_date),
-                "Fuel type share table" if kpi7_metric_mode == "share" else "Fuel type volume table",
+                f"Fuel Type {'Share' if kpi7_metric_mode == 'share' else 'Volume'} Table - {kpi7_status_group} - {'Share' if kpi7_metric_mode == 'share' else 'Volume'} - {kpi7_period_mode.capitalize()}",
             ),
         ],
     )
@@ -1656,20 +1674,26 @@ def build_view2_download_report(
         kpi8_result = f"{len(metric_cols)} categories"
 
     if metric_mode == "share":
+        metric_cols = [c for c in table_kpi8.columns if c not in ["YEAR", "MONTH"]]
         for column in metric_cols:
             table_kpi8[column] = table_kpi8[column].map(lambda value: percent_or_na_precision(cast(float | None, value), 1) if pd.notna(value) else "N/A")
 
-    params_str = " | ".join([f"{k}: {v}" for k, v in params])
-    summary_text = f"<p class=\"muted\"><strong>Parameters:</strong> {params_str}</p>"
+    title_mode_cap = "Share" if metric_mode == "share" else "Volume"
+    main_title = f"Production by Fuel Type - {asset_status} - {title_mode_cap} - {x_title}"
+    subtitle = f"{country} | {year} | {bike_or_car}"
+    summary_text = f"<p class=\"muted\">{html_escape(subtitle)}</p>"
+
+    # Remove internal figure title to avoid duplication in report
+    fig.update_layout(title=None, margin=dict(t=30))
 
     return html_report_document(
-        f"Fleet Monitoring - View 2 - Production by fuel type ({title_mode})",
+        f"Fleet Monitoring - View 2 - {main_title}",
         [
-            f"<div class=\"section\"><h2>Production by fuel type ({title_mode})</h2>{summary_text}</div>",
-            f"<div class=\"section\"><h2>Production by fuel type ({title_mode}) by {x_title.lower()}</h2>{figure_to_html_block(fig)}</div>",
+            f"<div class=\"section\"><h2>{html_escape(main_title)}</h2>{summary_text}</div>",
+            f"<div class=\"section\">{figure_to_html_block(fig)}</div>",
             build_html_table_from_df(
                 format_view2_table_for_display(build_view2_table_with_total(table_kpi8, metric_mode)),
-                f"Production by fuel type ({title_mode}) table",
+                f"Production by Fuel Type Table - {asset_status} - {title_mode_cap} - {x_title}",
             ),
         ],
     )
@@ -2495,10 +2519,9 @@ def view1_layout() -> html.Div:
                 ],
                 className="panel",
             ),
-            html.Div(id="kpi-period-note", className="small-note"),
             html.Div(
                 [
-                    html.Div("Fuel type share", className="panel-title"),
+                    html.Div("Fuel Type Share", className="panel-title"),
                     html.Div(
                         [
                             html.Div(
@@ -2692,7 +2715,7 @@ def view2_layout() -> html.Div:
             ),
             html.Div(
                 [
-                    html.Div("Production by fuel type", className="panel-title"),
+                    html.Div("Production by Fuel Type", className="panel-title"),
                     dcc.Graph(id="v2-kpi8-graph", config={"displayModeBar": False}),
                     html.Div(id="v2-kpi8-table-wrap"),
                 ],
@@ -3255,7 +3278,11 @@ def update_kpi7(_refresh_clicks: int, _kpi7_refresh_clicks: int, country: str, s
         period_title = "by month"
     else:
         period_title = "yearly"
-    title = f"Fuel type {title_mode} {period_title}<br><sup>{country_label} | {status_group} | {bike_or_car}</sup>"
+    if start_date and end_date:
+        date_info = f" from {start_date} to {end_date}"
+    else:
+        date_info = ""
+    title = f"Fuel Type {title_mode} {period_title}{date_info}<br><sup>{country_label} | {status_group} | {bike_or_car}</sup>"
 
     fig = figure_from_pivot(pivot, y_title, x_title, title)
 
@@ -3265,7 +3292,8 @@ def update_kpi7(_refresh_clicks: int, _kpi7_refresh_clicks: int, country: str, s
     table_df = build_kpi7_table_with_total(pivot, metric_mode, country, status_group, period_mode, bike_or_car, start_date, end_date)
     table = build_table(table_df, page_size=15)
 
-    table_title = "Fuel type share table" if metric_mode == "share" else "Fuel type volume table"
+    title_mode_cap = "Share" if metric_mode == "share" else "Volume"
+    table_title = f"Fuel Type {title_mode_cap} Table - {status_group} - {title_mode_cap} - {period_mode.capitalize()}"
     return fig, html.Div([html.H4(table_title, className="panel-title"), table])
 
 
@@ -3591,11 +3619,7 @@ def download_view1_html(
     prevent_initial_call=True,
 )
 def update_kpi_period_note(_refresh_clicks: int, year: int | str, month_value: int | str):
-    if has_missing_filters(year):
-        return ""
-    if month_value in (None, "ALL"):
-        return f"Applied period: {year} (automatic month set to the latest available month)"
-    return f"Applied period: {int(month_value):02d}-{year}"
+    return ""
 
 
 @app.callback(
@@ -3642,7 +3666,7 @@ def update_view2_kpi8(_refresh_clicks: int, country: str, year: int | str, metri
     table_kpi8, y_title, x_title, period_label = get_kpi8_cached(country, year, asset_status, metric_mode, bike_or_car, v2_date_mode_filter)
     table_kpi8 = table_kpi8.copy()
     title_mode = "share" if metric_mode == "share" else "volume"
-    title = f"Fuel type {title_mode} by {x_title.lower()}<br><sup>{period_label} | {country} | {bike_or_car}</sup>"
+    title = f"Fuel Type {title_mode} by {x_title.lower()}<br><sup>{period_label} | {country} | {bike_or_car}</sup>"
 
     fig = go.Figure()
     if not table_kpi8.empty:
@@ -3675,8 +3699,9 @@ def update_view2_kpi8(_refresh_clicks: int, country: str, year: int | str, metri
 
     table_kpi8 = build_view2_table_with_total(table_kpi8, metric_mode)
     table = build_table(format_view2_table_for_display(table_kpi8), page_size=15)
-    v2_table_title = "Production share per fuel type table" if metric_mode == "share" else "Production volume per fuel type table"
-    return fig, html.Div([html.H4(v2_table_title, className="panel-title"), table])
+    title_mode_cap = "Share" if metric_mode == "share" else "Volume"
+    table_title = f"Production by Fuel Type Table - {asset_status} - {title_mode_cap} - {x_title}"
+    return fig, html.Div([html.H4(table_title, className="panel-title"), table])
 
 
 @app.callback(
