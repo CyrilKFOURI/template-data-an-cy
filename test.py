@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import calendar
@@ -16,19 +15,96 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from dash import Dash, Input, Output, State, dash_table, dcc, html, no_update, ALL
 
-
-
+# --- Paths ---
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_DATA_FOLDER = BASE_DIR / "data"
 DEFAULT_MARKET_DATA_PATH = BASE_DIR / "market_dataset_europe.parquet"
 LOGO_PATH = BASE_DIR / "a.jpg"
 
+# --- Data Loading Scope ---
 HARDCODED_DATA_PATH = ""
 COUNTRIES_TO_READ = ["SPAIN"]
 START_YYYYMM = "202301"
 END_YYYYMM = "202512"
 
+USE_UNIQUE_KEY_LOGIC = True
+UNIQUE_KEY_COLS = ['ID_CONTRACT', 'VEHICLE_ID', 'ID_QUOTATION']
 
+# --- KPI REGISTRY: Single Source of Truth for Labels, Limits, and Logic ---
+KPI_REGISTRY = {
+    "kpi1": {
+        "label": "KPI 1 - LTR < 25",
+        "description": "LTR < 25 share",
+        "limit": 25.0,
+        "color": "#1d5f99",
+        "func_name": "kpi_lease_under_25"
+    },
+    "kpi2": {
+        "label": "KPI 2 - LTR [25-30]",
+        "description": "LTR [25-30] share",
+        "limit": 30.0,
+        "color": "#2f855a",
+        "func_name": "kpi_lease_25_30"
+    },
+    "kpi3": {
+        "label": "KPI 3 - DI vs Non-DI",
+        "description": "Diesel vs Non-Diesel",
+        "limit": None,
+        "color": "#d98943",
+        "func_name": "kpi_diesel_non_diesel"
+    },
+    "kpi4": {
+        "label": "KPI 4 - Hybrid Share",
+        "description": "Hybrid Share (HEV + PHEV)",
+        "limit": None,
+        "color": "#b08b2f",
+        "func_name": "kpi_hybrid_share"
+    },
+    "kpi5": {
+        "label": "KPI 5 - EV Share",
+        "description": "EV (Electric) Share",
+        "limit": None,
+        "color": "#2f7f5f",
+        "func_name": "kpi_ev_share"
+    },
+    "kpi6": {
+        "label": "KPI 6 - PC vs LCV",
+        "description": "PC vs LCV share",
+        "limit": None,
+        "color": "#d64545",
+        "func_name": "kpi_pv_lcv"
+    }
+}
+
+# =============================================================================
+# 2. CORE UTILITY FUNCTIONS & DATA HELPERS
+# =============================================================================
+
+def get_kpi_data(df: pd.DataFrame, col: str | None = None, extra_keys: list[str] | None = None) -> pd.Series | pd.DataFrame:
+    """
+    Centralized helper to handle unique key logic for all KPIs.
+    If USE_UNIQUE_KEY_LOGIC is True, it aggregates data by the unique key.
+    If col is provided, it returns a Series of the first value found for that column.
+    extra_keys: list of additional columns to include in the unique key (e.g. ['PERIOD_LABEL']).
+    """
+    if df.empty:
+        return pd.Series(dtype=float) if col else df
+    if not USE_UNIQUE_KEY_LOGIC:
+        return df[col] if col else df
+    
+    keys = UNIQUE_KEY_COLS.copy()
+    if extra_keys:
+        for k in extra_keys:
+            if k in df.columns and k not in keys:
+                keys.append(k)
+    
+    missing = [c for c in UNIQUE_KEY_COLS if c not in df.columns]
+    if missing:
+        return df[col] if col else df
+        
+    if col:
+        return df.groupby(keys)[col].first()
+    return df.drop_duplicates(subset=keys)
 
 COLUMNS_TO_READ = [
     'EXTENSION_DATE',
@@ -55,37 +131,33 @@ COLUMNS_TO_READ = [
     'FUEL_TYPE2',
     'FUEL_TYPE',
     'VA_CO2_EMSS_REAL',
+    'DELIVERY_DATE',
 ]
 
 FUEL_COLOR_SEQUENCE = [
-    "#2c3e50", # Diesel (Priority 0) - Dark Slate
-    "#e67e22", # Petrol (Priority 1) - Orange
-    "#f1c40f", # HEV (Priority 2) - Yellow/Gold
-    "#2ecc71", # PHEV (Priority 3) - Emerald Green
-    "#16a085", # BEV (Priority 4) - Teal
-    "#3498db", # Blue
-    "#8e44ad", # Purple
-    "#d35400", # Dark Orange
-    "#7f8c8d", # Grey
+    "#2c3e50", # Diesel
+    "#e67e22", # Petrol
+    "#f1c40f", # HEV
+    "#2ecc71", # PHEV
+    "#16a085", # BEV
+    "#3498db", 
+    "#8e44ad", 
+    "#d35400", 
+    "#7f8c8d",
 ]
 
-
 def fuel_label_priority(label: str) -> int:
+    """Orders fuel types for consistent visualization colors."""
     value = str(label).strip().upper()
-    if "DIESEL" in value or value in {"DI", "D"}:
-        return 0
-    if any(token in value for token in ["PETROL", "GASOLINA", "BENZINA", "ESSENCE", "GAZ", "GAS", "NON-DI"]):
-        return 1
-    if "HEV" in value or "HYBRID" in value or "MHEV" in value:
-        return 2
-    if "PHEV" in value or "PLUG-IN" in value or "PLUGIN" in value:
-        return 3
-    if "EV" in value or "ELECTRIC" in value or "BEV" in value:
-        return 4
+    if "DIESEL" in value or value in {"DI", "D"}: return 0
+    if any(token in value for token in ["PETROL", "GASOLINA", "BENZINA", "ESSENCE", "GAZ", "GAS", "NON-DI"]): return 1
+    if "HEV" in value or "HYBRID" in value or "MHEV" in value: return 2
+    if "PHEV" in value or "PLUG-IN" in value or "PLUGIN" in value: return 3
+    if "EV" in value or "ELECTRIC" in value or "BEV" in value: return 4
     return 10
 
-
 def fuel_color_map(labels: list[object]) -> dict[str, str]:
+    """Generates a mapping of fuel types to fixed colors."""
     names = [str(label) for label in labels]
     ordered = sorted(enumerate(names), key=lambda item: (fuel_label_priority(item[1]), item[0]))
     color_by_name: dict[str, str] = {}
@@ -93,9 +165,9 @@ def fuel_color_map(labels: list[object]) -> dict[str, str]:
         color_by_name[name] = FUEL_COLOR_SEQUENCE[position % len(FUEL_COLOR_SEQUENCE)]
     return color_by_name
 
+# --- Data Loading Logic ---
 def normalize_copied_path(path_value: str) -> str:
     return path_value.strip().strip('"').strip("'")
-
 
 def load_country_monthly_data(
     folder_path: Path | str,
@@ -321,6 +393,9 @@ def html_status_dot(status: str) -> str:
     color = kpi_limit_color(status)
     return f'<span class="status-dot" style="background-color: {color};"></span>'
 
+# =============================================================================
+# 3. VIEW 1 - FLEET MONITORING (MAIN KPI CALCULATION FUNCTIONS)
+# =============================================================================
 
 def kpi_selected_volume(
     df: pd.DataFrame,
@@ -334,15 +409,15 @@ def kpi_selected_volume(
     current_status = "ALL" if date_mode != "NONE" else status
     subset = filter_base(df, country, year, status=current_status, bike_or_car=bike_or_car).copy()
     if date_mode in ("CONTRACT_START_DATE", "DELIVERY_DATE"):
-        subset[date_mode] = pd.to_datetime(subset[date_mode], errors="coerce")
-        subset = subset[
-            (subset[date_mode].dt.year == int(year))
-            & (subset[date_mode].dt.month == subset["MONTH"])
-        ]
+        if year != "ALL":
+            subset = subset[subset[date_mode].dt.year == int(year)]
+        if month_value and month_value != "ALL":
+            subset = subset[subset[date_mode].dt.month == int(month_value)]
     if month_value not in (None, "ALL"):
         subset = subset[subset["MONTH"] == int(month_value)]
-    subset = subset.drop_duplicates(subset=["VEHICLE_ID"])
-    return int(len(subset))
+    
+    unique_data = get_kpi_data(subset)
+    return int(len(unique_data))
 
 
 def apply_status_filter(df: pd.DataFrame, status: str | None) -> pd.DataFrame:
@@ -407,25 +482,25 @@ def kpi_lease_under_25(
     month_value: int | str | None = "ALL",
     bike_or_car: str = "CAR",
     date_mode: str = "NONE",
+    status: str = "IN FLEET",
 ) -> float | None:
-    current_status = "ALL" if date_mode != "NONE" else "IN FLEET"
+    current_status = status if date_mode == "NONE" else "ALL"
     subset = filter_base(df, country, year, status=current_status, bike_or_car=bike_or_car)
 
     if date_mode in ("CONTRACT_START_DATE", "DELIVERY_DATE"):
-        subset[date_mode] = pd.to_datetime(subset[date_mode], errors="coerce")
-        subset = subset[
-            (subset[date_mode].dt.year == int(year))
-            & (subset[date_mode].dt.month == subset["MONTH"])
-        ]
+        if year != "ALL":
+            subset = subset[subset[date_mode].dt.year == int(year)]
+        if month_value and month_value != "ALL":
+            subset = subset[subset[date_mode].dt.month == int(month_value)]
 
     if month_value not in (None, "ALL"):
         subset = subset[subset["MONTH"] == int(month_value)]
 
-    subset = subset.drop_duplicates(subset=["VEHICLE_ID"])
-    if subset.empty:
+    data = get_kpi_data(subset, "FINAL_CONTRACT_DURATION")
+    if data.empty:
         return None
 
-    res = (subset["FINAL_CONTRACT_DURATION"] < 25).mean() * 100
+    res = (data < 25).mean() * 100
     return float(res) if pd.notna(res) else None
 
 
@@ -436,25 +511,25 @@ def kpi_lease_25_30(
     month_value: int | str | None = "ALL",
     bike_or_car: str = "CAR",
     date_mode: str = "NONE",
+    status: str = "IN FLEET",
 ) -> float | None:
-    current_status = "ALL" if date_mode != "NONE" else "IN FLEET"
+    current_status = status if date_mode == "NONE" else "ALL"
     subset = filter_base(df, country, year, status=current_status, bike_or_car=bike_or_car)
 
     if date_mode in ("CONTRACT_START_DATE", "DELIVERY_DATE"):
-        subset[date_mode] = pd.to_datetime(subset[date_mode], errors="coerce")
-        subset = subset[
-            (subset[date_mode].dt.year == int(year))
-            & (subset[date_mode].dt.month == subset["MONTH"])
-        ]
+        if year != "ALL":
+            subset = subset[subset[date_mode].dt.year == int(year)]
+        if month_value and month_value != "ALL":
+            subset = subset[subset[date_mode].dt.month == int(month_value)]
 
     if month_value not in (None, "ALL"):
         subset = subset[subset["MONTH"] == int(month_value)]
 
-    subset = subset.drop_duplicates(subset=["VEHICLE_ID"])
-    if subset.empty:
+    data = get_kpi_data(subset, "FINAL_CONTRACT_DURATION")
+    if data.empty:
         return None
 
-    res = subset["FINAL_CONTRACT_DURATION"].between(25, 30, inclusive="both").mean() * 100
+    res = data.between(25, 30, inclusive="both").mean() * 100
     return float(res) if pd.notna(res) else None
 
 
@@ -465,27 +540,29 @@ def kpi_diesel_non_diesel(
     month: int,
     bike_or_car: str = "CAR",
     date_mode: str = "NONE",
+    status: str = "IN FLEET",
 ) -> tuple[float | None, float | None]:
-    current_status = "ALL" if date_mode != "NONE" else "IN FLEET"
+    current_status = status if date_mode == "NONE" else "ALL"
     subset = filter_base(df, country, year, status=current_status, bike_or_car=bike_or_car)
 
     if date_mode in ("CONTRACT_START_DATE", "DELIVERY_DATE"):
-        subset[date_mode] = pd.to_datetime(subset[date_mode], errors="coerce")
-        subset = subset[
-            (subset[date_mode].dt.year == int(year))
-            & (subset[date_mode].dt.month == subset["MONTH"])
-        ]
+        if year != "ALL":
+            subset = subset[subset[date_mode].dt.year == int(year)]
+        if month and month != "ALL":
+            subset = subset[subset[date_mode].dt.month == int(month)]
 
     if month not in (None, "ALL"):
         subset = subset[subset["MONTH"] == int(month)]
     
-    if subset.empty:
-        return None, None
     power_col = pick_first_existing_column(subset, ["POWER_CATEGORY_2", "POWER_CATEGORY"])
     if power_col is None:
         return None, None
-    values = subset[power_col].astype(str).str.upper()
-    diesel_share_raw = (values == "DIESEL").mean() * 100
+        
+    data = get_kpi_data(subset, power_col).astype(str).str.upper()
+    if data.empty:
+        return None, None
+        
+    diesel_share_raw = (data == "DIESEL").mean() * 100
     if pd.isna(diesel_share_raw):
         return None, None
     diesel_share = float(diesel_share_raw)
@@ -499,27 +576,30 @@ def kpi_hybrid_share(
     month: int,
     bike_or_car: str = "CAR",
     date_mode: str = "NONE",
+    status: str = "IN FLEET",
 ) -> float | None:
-    current_status = "ALL" if date_mode != "NONE" else "IN FLEET"
+    current_status = status if date_mode == "NONE" else "ALL"
     subset = filter_base(df, country, year, status=current_status, bike_or_car=bike_or_car)
 
     if date_mode in ("CONTRACT_START_DATE", "DELIVERY_DATE"):
-        subset[date_mode] = pd.to_datetime(subset[date_mode], errors="coerce")
-        subset = subset[
-            (subset[date_mode].dt.year == int(year))
-            & (subset[date_mode].dt.month == subset["MONTH"])
-        ]
+        if year != "ALL":
+            subset = subset[subset[date_mode].dt.year == int(year)]
+        if month and month != "ALL":
+            subset = subset[subset[date_mode].dt.month == int(month)]
 
     if month not in (None, "ALL"):
         subset = subset[subset["MONTH"] == int(month)]
         
-    if subset.empty:
-        return None
     power_col = pick_first_existing_column(subset, ["POWER_CATEGORY"])
     if power_col is None:
         return None
-    values = subset[power_col].astype(str).str.upper()
-    res = values.isin(["FULL HYBRID", "PLUG-IN HYBRID"]).mean() * 100
+        
+    data = get_kpi_data(subset, power_col).astype(str).str.upper()
+    if data.empty:
+        return None
+        
+    mask = data.isin(["FULL HYBRID", "PLUG-IN HYBRID"])
+    res = mask.mean() * 100
     return float(res) if pd.notna(res) else None
 
 
@@ -530,27 +610,29 @@ def kpi_ev_share(
     month: int,
     bike_or_car: str = "CAR",
     date_mode: str = "NONE",
+    status: str = "IN FLEET",
 ) -> float | None:
-    current_status = "ALL" if date_mode != "NONE" else "IN FLEET"
+    current_status = status if date_mode == "NONE" else "ALL"
     subset = filter_base(df, country, year, status=current_status, bike_or_car=bike_or_car)
 
     if date_mode in ("CONTRACT_START_DATE", "DELIVERY_DATE"):
-        subset[date_mode] = pd.to_datetime(subset[date_mode], errors="coerce")
-        subset = subset[
-            (subset[date_mode].dt.year == int(year))
-            & (subset[date_mode].dt.month == subset["MONTH"])
-        ]
+        if year != "ALL":
+            subset = subset[subset[date_mode].dt.year == int(year)]
+        if month and month != "ALL":
+            subset = subset[subset[date_mode].dt.month == int(month)]
 
     if month not in (None, "ALL"):
         subset = subset[subset["MONTH"] == int(month)]
         
-    if subset.empty:
-        return None
     power_col = pick_first_existing_column(subset, ["POWER_CATEGORY"])
     if power_col is None:
         return None
-    values = subset[power_col].astype(str).str.upper()
-    res = (values == "ELECTRIC").mean() * 100
+        
+    data = get_kpi_data(subset, power_col).astype(str).str.upper()
+    if data.empty:
+        return None
+        
+    res = (data == "ELECTRIC").mean() * 100
     return float(res) if pd.notna(res) else None
 
 
@@ -561,27 +643,27 @@ def kpi_pv_lcv(
     month: int,
     bike_or_car: str = "CAR",
     date_mode: str = "NONE",
+    status: str = "IN FLEET",
 ) -> tuple[float | None, float | None]:
-    current_status = "ALL" if date_mode != "NONE" else "IN FLEET"
+    current_status = status if date_mode == "NONE" else "ALL"
     subset = filter_base(df, country, year, status=current_status, bike_or_car=bike_or_car)
 
     if date_mode in ("CONTRACT_START_DATE", "DELIVERY_DATE"):
-        subset[date_mode] = pd.to_datetime(subset[date_mode], errors="coerce")
-        subset = subset[
-            (subset[date_mode].dt.year == int(year))
-            & (subset[date_mode].dt.month == subset["MONTH"])
-        ]
+        if year != "ALL":
+            subset = subset[subset[date_mode].dt.year == int(year)]
+        if month and month != "ALL":
+            subset = subset[subset[date_mode].dt.month == int(month)]
 
     if month not in (None, "ALL"):
         subset = subset[subset["MONTH"] == int(month)]
         
-    if subset.empty:
+    data = get_kpi_data(subset, 'CLS_VEHICLE_TYPE').astype(str).str.upper()
+    if data.empty:
         return None, None
-    values = subset["CLS_VEHICLE_TYPE"].astype(str).str.upper()
-    pv_share_raw = (values == "PV").mean() * 100
+    pv_share_raw = (data == "PV").mean() * 100
     if pd.isna(pv_share_raw):
         return None, None
-    lcv_share_raw = values.isin(["LCV", "LV"]).mean() * 100
+    lcv_share_raw = data.isin(["LCV", "LV"]).mean() * 100
     if pd.isna(lcv_share_raw):
         return None, None
     return float(pv_share_raw), float(lcv_share_raw)
@@ -590,6 +672,9 @@ def kpi_pv_lcv(
 def detect_fuel_column(df: pd.DataFrame) -> str | None:
     return "POWER_CATEGORY_2"
 
+# =============================================================================
+# 5. VIEW 3 - EVOLUTION & FUEL ANALYSIS (KPI 7)
+# =============================================================================
 
 def kpi7_fuel_by_period(
     df: pd.DataFrame,
@@ -655,6 +740,9 @@ def kpi7_fuel_by_period(
         x_title = "Year"
         period_label = "Yearly"
 
+    # Apply unique key logic (per period)
+    subset = get_kpi_data(subset, extra_keys=["PERIOD_LABEL"])
+    
     grouped = subset.groupby([fuel_col, "PERIOD_SORT", "PERIOD_LABEL"]).size().reset_index(name="VOLUME")
     if grouped.empty:
         return pd.DataFrame(), "", "", ""
@@ -693,14 +781,7 @@ def resolve_month_value(country: str, year: int | str, month_value: int | str) -
 
 
 def kpi_summary_description_map() -> dict[str, str]:
-    return {
-        "kpi1": "LTR <25 share",
-        "kpi2": "LTR [25-30] share",
-        "kpi3": "Diesel Share, In fleet",
-        "kpi4": "Hyb (HEV + PHEV) In fleet",
-        "kpi5": "EV share. In fleet",
-        "kpi6": "PC vs LCV share, In fleet",
-    }
+    return {k: v["description"] for k, v in KPI_REGISTRY.items()}
 
 
 @lru_cache(maxsize=512)
@@ -731,6 +812,7 @@ def get_view1_metrics_cached(
     kpi4_date_mode: str = "NONE",
     kpi5_date_mode: str = "NONE",
     kpi6_date_mode: str = "NONE",
+    status_value: str = "IN FLEET",
 ) -> dict[str, object]:
     month1 = kpi1_month
     month2 = kpi2_month
@@ -739,25 +821,20 @@ def get_view1_metrics_cached(
     month5 = resolve_month_value(kpi5_country, kpi5_year, kpi5_month)
     month6 = resolve_month_value(kpi6_country, kpi6_year, kpi6_month)
 
-    # Individual date modes override the global one if set to something other than 'NONE'
-    # Actually, if the card has a dropdown, we should probably just use it.
-    # But for backward compatibility with reports/global filters, let's say if it's 'NONE' on the card but global is set, we use global?
-    # No, the user wants individual filters. If they set 'NONE' on card but 'Contract' globally, maybe they want 'NONE' for that card.
-    # Let's just use the card's date mode value.
-    dm1 = kpi1_date_mode
-    dm2 = kpi2_date_mode
-    dm3 = kpi3_date_mode
-    dm4 = kpi4_date_mode
-    dm5 = kpi5_date_mode
-    dm6 = kpi6_date_mode
+    dm1 = kpi1_date_mode if kpi1_date_mode != "NONE" else date_mode
+    dm2 = kpi2_date_mode if kpi2_date_mode != "NONE" else date_mode
+    dm3 = kpi3_date_mode if kpi3_date_mode != "NONE" else date_mode
+    dm4 = kpi4_date_mode if kpi4_date_mode != "NONE" else date_mode
+    dm5 = kpi5_date_mode if kpi5_date_mode != "NONE" else date_mode
+    dm6 = kpi6_date_mode if kpi6_date_mode != "NONE" else date_mode
 
     return {
-        "kpi1": kpi_lease_under_25(df, kpi1_country, kpi1_year, month1, kpi_common_bike_or_car, dm1),
-        "kpi2": kpi_lease_25_30(df, kpi2_country, kpi2_year, month2, kpi_common_bike_or_car, dm2),
-        "diesel_non": kpi_diesel_non_diesel(df, kpi3_country, kpi3_year, month3, kpi_common_bike_or_car, dm3),
-        "hybrid": kpi_hybrid_share(df, kpi4_country, kpi4_year, month4, kpi_common_bike_or_car, dm4),
-        "ev": kpi_ev_share(df, kpi5_country, kpi5_year, month5, kpi_common_bike_or_car, dm5),
-        "pv_lcv": kpi_pv_lcv(df, kpi6_country, kpi6_year, month6, kpi_common_bike_or_car, dm6),
+        "kpi1": kpi_lease_under_25(df, kpi1_country, kpi1_year, month1, kpi_common_bike_or_car, dm1, status_value),
+        "kpi2": kpi_lease_25_30(df, kpi2_country, kpi2_year, month2, kpi_common_bike_or_car, dm2, status_value),
+        "diesel_non": kpi_diesel_non_diesel(df, kpi3_country, kpi3_year, month3, kpi_common_bike_or_car, dm3, status_value),
+        "hybrid": kpi_hybrid_share(df, kpi4_country, kpi4_year, month4, kpi_common_bike_or_car, dm4, status_value),
+        "ev": kpi_ev_share(df, kpi5_country, kpi5_year, month5, kpi_common_bike_or_car, dm5, status_value),
+        "pv_lcv": kpi_pv_lcv(df, kpi6_country, kpi6_year, month6, kpi_common_bike_or_car, dm6, status_value),
         "month3": month3,
         "month4": month4,
         "month5": month5,
@@ -891,58 +968,8 @@ def render_kpi_summary_table(rows: list[dict[str, object]]) -> dash_table.DataTa
     )
 
 
-def kpi7_fuel_share_quarter(df: pd.DataFrame, year: int | str, status: str = "IN FLEET") -> pd.DataFrame:
-    """Retourne la part de carburant par trimestre."""
-    subset = df[
-        (df["NOVA_ASSET_STATUS"].str.contains(status, case=False, na=False))
-        & (df["YEAR"] == int(year))
-    ].copy()
-    
-    subset = subset.dropna(subset=["POWER_CATEGORY_2"])
-    
-    if subset.empty:
-        return pd.DataFrame()
-    
-    subset["Quarter"] = "Q" + (((subset["MONTH"] - 1) // 3) + 1).astype(str)
-    
-    grouped = (
-        subset.groupby(["POWER_CATEGORY_2", "Quarter"])
-        ["VEHICLE_ID"]
-        .count()
-        .reset_index(name="VOLUME")
-    )
-    
-    pivot = grouped.pivot(index="POWER_CATEGORY_2", columns="Quarter", values="VOLUME").fillna(0)
-    share = pivot.div(pivot.sum(axis=0), axis=1) * 100
-    share = share.loc[share.sum(axis=1).sort_values(ascending=False).index]
-    
-    return share.round(2)
 
 
-def kpi8_volume_by_power(df: pd.DataFrame, year: int | str, status: str = "IN FLEET", country: str = "ALL") -> pd.DataFrame:
-    """Retourne le volume de production par carburant (YEAR, MONTH, POWER_CATEGORY)."""
-    subset = df[
-        (df["NOVA_ASSET_STATUS"].str.contains(status, case=False, na=False))
-        & (df["YEAR"] == int(year))
-    ].copy()
-    
-    if country != "ALL":
-        subset = subset[subset["COUNTRY"] == country]
-    
-    grouped = (
-        subset.groupby(["YEAR", "MONTH", "POWER_CATEGORY"])
-        .size()
-        .reset_index(name="VOLUME")
-    )
-    
-    table = (
-        grouped.pivot(index=["YEAR", "MONTH"], columns="POWER_CATEGORY", values="VOLUME")
-        .fillna(0)
-        .reset_index()
-        .sort_values(["YEAR", "MONTH"])
-    )   
-    
-    return table
 
 
 def build_card(title: str, main_value: str, subtitle: str, accent: str) -> html.Div:
@@ -1271,11 +1298,22 @@ def build_html_table_from_df(df_table: pd.DataFrame, title: str) -> str:
                 return f"<div class=\"section\"><h2>{title}</h2><p class=\"muted\">Aucune donnée disponible.</p></div>"
         table_df = df_table.copy()
         if "signal" in table_df.columns and "result" in table_df.columns:
-            signal_dot = {"green": "🟢", "orange": "🟠", "red": "🔴"}
-            table_df["result"] = table_df.apply(
-                lambda row: f"{signal_dot.get(str(row['signal']), '')} {row['result']}".strip() if str(row.get("signal", "")) != "neutral" else str(row["result"]),
-                axis=1,
-            )
+            # Use colored circles instead of corrupted characters
+            signal_style = {
+                "green": "color: #2f855a; margin-right: 4px;",
+                "orange": "color: #f0a202; margin-right: 4px;",
+                "red": "color: #d64545; margin-right: 4px;"
+            }
+            
+            def format_result_with_signal(row):
+                sig = str(row.get("signal", "neutral"))
+                val = str(row.get("result", ""))
+                if sig in signal_style:
+                    # Note: Using simple dot for HTML string output
+                    return f"<span style='{signal_style[sig]}'>●</span> {val}"
+                return val
+
+            table_df["result"] = table_df.apply(format_result_with_signal, axis=1)
             table_df = table_df.drop(columns=["signal"])
 
         if "description" in table_df.columns:
@@ -1367,7 +1405,7 @@ def build_kpi7_table_with_total(
                     lambda value: format_volume(value)
                 )
             else:
-                # Use an object-typed intermediary to safely mix percent strings and numeric totals.
+                
                 display_col = table_df[column].astype("object")
                 display_col.loc[~total_mask] = table_df.loc[~total_mask, column].map(
                     lambda value: percent_or_na_precision(cast(float | None, value), 1) if pd.notna(value) else "N/A"
@@ -1380,7 +1418,7 @@ def build_kpi7_table_with_total(
         for column in [c for c in table_df.columns if c != "Fuel type"]:
             table_df[column] = table_df[column].map(lambda value: format_volume(value))
 
-    # Remove TOTAL column if it exists, but keep the TOTAL row
+
     if "TOTAL" in table_df.columns:
         table_df = table_df.drop(columns=["TOTAL"])
 
@@ -1499,153 +1537,66 @@ def build_view1_download_report(
         f"Fuel Type {'share' if kpi7_metric_mode == 'share' else 'volume'} {kpi7_period_title}{date_info}<br><sup>{kpi7_country} | {kpi7_status_group} | {kpi7_bike_or_car}</sup>",
     )
 
-    kpi1_volume = kpi_selected_volume(df, kpi1_country, kpi1_year, kpi1_month, status="IN FLEET", bike_or_car=kpi_common_bike_or_car, date_mode=kpi1_dm)
-    kpi2_volume = kpi_selected_volume(df, kpi2_country, kpi2_year, kpi2_month, status="IN FLEET", bike_or_car=kpi_common_bike_or_car, date_mode=kpi2_dm)
-    kpi3_volume = kpi_selected_volume(df, kpi3_country, kpi3_year, month3, status="IN FLEET", bike_or_car=kpi_common_bike_or_car, date_mode=kpi3_dm)
-    kpi4_volume = kpi_selected_volume(df, kpi4_country, kpi4_year, month4, status="IN FLEET", bike_or_car=kpi_common_bike_or_car, date_mode=kpi4_dm)
-    kpi5_volume = kpi_selected_volume(df, kpi5_country, kpi5_year, month5, status="IN FLEET", bike_or_car=kpi_common_bike_or_car, date_mode=kpi5_dm)
-    kpi6_volume = kpi_selected_volume(df, kpi6_country, kpi6_year, month6, status="IN FLEET", bike_or_car=kpi_common_bike_or_car, date_mode=kpi6_dm)
+    # Map KPI ID to its specific parameters for unified processing
+    kpi_params = {
+        "kpi1": (kpi1_country, kpi1_year, kpi1_month, kpi1_volume, kpi1_val),
+        "kpi2": (kpi2_country, kpi2_year, kpi2_month, kpi2_volume, kpi2_val),
+        "kpi3": (kpi3_country, kpi3_year, month3, kpi3_volume, diesel_non),
+        "kpi4": (kpi4_country, kpi4_year, month4, kpi4_volume, hybrid_val),
+        "kpi5": (kpi5_country, kpi5_year, month5, kpi5_volume, ev_val),
+        "kpi6": (kpi6_country, kpi6_year, month6, kpi6_volume, pv_lcv_val),
+    }
 
-    desc = kpi_summary_description_map()
+    kpi_rows = []
+    kpi_cards = []
 
-    kpi_rows = [
-        {
-            "label": "LTR < 25",
-            "description": f"LTR <25 share, Limit {('N/A' if kpi1_limit is None else f'{float(kpi1_limit):g}%')}",
-            "country": kpi1_country,
-            "period": summary_month_label(kpi1_year, None if kpi1_month in (None, 'ALL') else int(kpi1_month)),
-            "result": percent_or_na_precision(kpi1_val, 2),
-            "volume": format_volume(kpi1_volume),
-            "signal": kpi_limit_status(kpi1_val, kpi1_limit),
-        },
-        {
-            "label": "LTR [25-30]",
-            "description": f"LTR [25-30] share, Limit {('N/A' if kpi2_limit is None else f'{float(kpi2_limit):g}%')}",
-            "country": kpi2_country,
-            "period": summary_month_label(kpi2_year, None if kpi2_month in (None, 'ALL') else int(kpi2_month)),
-            "result": percent_or_na_precision(kpi2_val, 2),
-            "volume": format_volume(kpi2_volume),
-            "signal": kpi_limit_status(kpi2_val, kpi2_limit),
-        },
-        {
-            "label": "DI vs Non-DI",
-            "description": "Total current fleet",
-            "country": kpi3_country,
-            "period": summary_month_label(kpi3_year, month3),
-            "result": f"{percent_or_na_precision(diesel_non[0], 2)} DI & {percent_or_na_precision(diesel_non[1], 2)} non-DI" if diesel_non[0] is not None else "N/A",
-            "volume": format_volume(kpi3_volume),
-            "signal": "neutral",
-        },
-        {
-            "label": "Hybrid share",
-            "description": "Hyb (HEV + PHEV) In fleet",
-            "country": kpi4_country,
-            "period": summary_month_label(kpi4_year, month4),
-            "result": percent_or_na_precision(hybrid_val, 2),
-            "volume": format_volume(kpi4_volume),
-            "signal": "neutral",
-        },
-        {
-            "label": "EV share",
-            "description": "EV share. In fleet",
-            "country": kpi5_country,
-            "period": summary_month_label(kpi5_year, month5),
-            "result": percent_or_na_precision(ev_val, 2),
-            "volume": format_volume(kpi5_volume),
-            "signal": "neutral",
-        },
-        {
-            "label": "PC vs LCV",
-            "description": "PC vs LCV share, In fleet",
-            "country": kpi6_country,
-            "period": summary_month_label(kpi6_year, month6),
-            "result": f"{percent_or_na_precision(pv_lcv_val[0], 2)} PV & {percent_or_na_precision(pv_lcv_val[1], 2)} LCV" if pv_lcv_val[0] is not None else "N/A",
-            "volume": format_volume(kpi6_volume),
-            "signal": "neutral",
-        },
-    ]
-    summary_df = pd.DataFrame(kpi_rows)
+    for kid, config in KPI_REGISTRY.items():
+        country_p, year_p, month_p, vol_p, val_p = kpi_params.get(kid, (None,None,None,None,None))
+        limit = config["limit"]
+        
+        display_val = "N/A"
+        display_val_summary = "N/A"
+        status = "neutral"
+        
+        if val_p is not None:
+            if isinstance(val_p, tuple):
+                display_val = f"{percent_or_na_precision(val_p[0], 2)} / {percent_or_na_precision(val_p[1], 2)}"
+                if kid == "kpi3": display_val_summary = f"{percent_or_na_precision(val_p[0], 2)} DI & {percent_or_na_precision(val_p[1], 2)} non-DI"
+                elif kid == "kpi6": display_val_summary = f"{percent_or_na_precision(val_p[0], 2)} PV & {percent_or_na_precision(val_p[1], 2)} LCV"
+                else: display_val_summary = display_val
+            else:
+                display_val = percent_or_na_precision(val_p, 2)
+                display_val_summary = display_val
+                status = kpi_limit_status(val_p, limit)
+        
+        limit_desc = f", Limit {limit}%" if limit else ""
+        period_lbl = summary_month_label(year_p, None if month_p in (None, 'ALL') else int(month_p))
 
-    summary_df = summary_df[["label", "country", "period", "result", "volume", "description", "signal"]]
+        kpi_rows.append({
+            "label": config["label"].split(" - ")[-1],
+            "description": config["description"] + limit_desc,
+            "country": country_p,
+            "period": period_lbl,
+            "result": display_val_summary,
+            "volume": format_volume(vol_p),
+            "signal": status,
+        })
 
-    kpi_cards = [
-        {
-            "label": "KPI 1 - LTR < 25",
-            "result": percent_or_na_precision(kpi1_val, 2),
-            "status": kpi_limit_status(kpi1_val, kpi1_limit),
+        kpi_cards.append({
+            "label": config["label"],
+            "result": display_val,
+            "status": status,
             "show_legend": True,
             "params": [
-                ("Country", kpi1_country),
-                ("Period", summary_month_label(kpi1_year, None if kpi1_month in (None, "ALL") else int(kpi1_month))),
+                ("Country", country_p),
+                ("Period", period_lbl),
                 ("Vehicle type", kpi_common_bike_or_car),
                 ("Asset status", "IN FLEET"),
-                ("Volume", format_volume(kpi1_volume)),
-                ("Limit", "5%" if kpi1_limit is None else f"{kpi1_limit}%"),
+                ("Volume", format_volume(vol_p)),
             ],
-        },
-        {
-            "label": "KPI 2 - LTR [25-30]",
-            "result": percent_or_na_precision(kpi2_val, 2),
-            "status": kpi_limit_status(kpi2_val, kpi2_limit),
-            "show_legend": True,
-            "params": [
-                ("Country", kpi2_country),
-                ("Period", summary_month_label(kpi2_year, None if kpi2_month in (None, "ALL") else int(kpi2_month))),
-                ("Vehicle type", kpi_common_bike_or_car),
-                ("Asset status", "IN FLEET"),
-                ("Volume", format_volume(kpi2_volume)),
-                ("Limit", "10%" if kpi2_limit is None else f"{kpi2_limit}%"),
-            ],
-        },
-        {
-            "label": "KPI 3 - DI vs Non-DI",
-            "result": f"{percent_or_na_precision(diesel_non[0], 2)} / {percent_or_na_precision(diesel_non[1], 2)}" if diesel_non[0] is not None else "N/A",
-            "status": "neutral",
-            "params": [
-                ("Country", kpi3_country),
-                ("Period", summary_month_label(kpi3_year, month3)),
-                ("Vehicle type", kpi_common_bike_or_car),
-                ("Asset status", "IN FLEET"),
-                ("Volume", format_volume(kpi3_volume))
-            ],
-        },
-        {
-            "label": "KPI 4 - Hybrid share",
-            "result": percent_or_na_precision(hybrid_val, 2),
-            "status": "neutral",
-            "params": [
-                ("Country", kpi4_country),
-                ("Period", summary_month_label(kpi4_year, month4)),
-                ("Vehicle type", kpi_common_bike_or_car),
-                ("Asset status", "IN FLEET"),
-                ("Volume", format_volume(kpi4_volume))
-            ],
-        },
-        {
-            "label": "KPI 5 - EV share",
-            "result": percent_or_na_precision(ev_val, 2),
-            "status": "neutral",
-            "params": [
-                ("Country", kpi5_country),
-                ("Period", summary_month_label(kpi5_year, month5)),
-                ("Vehicle type", kpi_common_bike_or_car),
-                ("Asset status", "IN FLEET"),
-                ("Volume", format_volume(kpi5_volume))
-            ],
-        },
-        {
-            "label": "KPI 6 - PC vs LCV",
-            "result": f"{percent_or_na_precision(pv_lcv_val[0], 2)} / {percent_or_na_precision(pv_lcv_val[1], 2)}" if pv_lcv_val[0] is not None else "N/A",
-            "status": "neutral",
-            "params": [
-                ("Country", kpi6_country),
-                ("Period", summary_month_label(kpi6_year, month6)),
-                ("Vehicle type", kpi_common_bike_or_car),
-                ("Asset status", "IN FLEET"),
-                ("Volume", format_volume(kpi6_volume))
-            ],
-        },
-    ]
+        })
+
+    summary_df = pd.DataFrame(kpi_rows)[["label", "country", "period", "result", "volume", "description", "signal"]]
 
     return html_report_document(
         "Fleet Monitoring - View 1 - Main KPIs",
@@ -1724,7 +1675,6 @@ def build_view2_download_report(
     subtitle = f"{country} | {year} | {bike_or_car}"
     summary_text = f"<p class=\"muted\">{html_escape(subtitle)}</p>"
 
-    # Remove internal figure title to avoid duplication in report
     fig.update_layout(title=None, margin=dict(t=30))
 
     return html_report_document(
@@ -1739,6 +1689,9 @@ def build_view2_download_report(
         ],
     )
 
+# =============================================================================
+# 4. VIEW 2 - PRODUCTION TRENDS (KPI 8)
+# =============================================================================
 
 def kpi8_production_ytd(
     df: pd.DataFrame,
@@ -1814,7 +1767,10 @@ def kpi9_1_vehicle_share_quarter(df: pd.DataFrame, country: str, year: int | str
     if subset.empty:
         return pd.DataFrame()
 
-    grouped = subset.groupby(["NOVA_ASSET_STATUS", "Quarter"])["VEHICLE_ID"].count().reset_index()
+    # Apply unique key logic (per quarter)
+    subset = get_kpi_data(subset, extra_keys=["Quarter"])
+    
+    grouped = subset.groupby(["NOVA_ASSET_STATUS", "Quarter"]).size().reset_index(name="VEHICLE_ID")
     pivot = grouped.pivot(index="NOVA_ASSET_STATUS", columns="Quarter", values="VEHICLE_ID").fillna(0)
     share = pivot.div(pivot.sum(axis=0), axis=1) * 100
     return share.round(2)
@@ -1842,12 +1798,24 @@ def kpi9_2_vehicle_energy_share_quarter(df: pd.DataFrame, country: str, year: in
     subset["MONTH"] = subset["MONTH"].astype(int)
     subset["Quarter"] = "Q" + (((subset["MONTH"] - 1) // 3) + 1).astype(str)
 
-    grouped = subset.groupby(["POWER_CATEGORY", "Quarter"])["VEHICLE_ID"].count().reset_index()
+    # Apply unique key logic (per quarter)
+    subset = get_kpi_data(subset, extra_keys=["Quarter"])
+    
+    grouped = subset.groupby(["POWER_CATEGORY", "Quarter"]).size().reset_index(name="VEHICLE_ID")
     pivot = grouped.pivot(index="Quarter", columns="POWER_CATEGORY", values="VEHICLE_ID").fillna(0)
     return pivot, "Volume", "Quarter", f"{vehicle_type} by energy"
 
 
-def kpi_count_share_quarterly(df: pd.DataFrame, asset_status: str, var_col: str, bike_or_car: str = "CAR", show_top_only: bool = False) -> pd.DataFrame:
+def apply_top_n_filter(grouped: pd.DataFrame, top_n: str, group_cols: list[str]) -> pd.DataFrame:
+    if str(top_n).upper() != "ALL":
+        try:
+            n = int(top_n)
+            return grouped.groupby(group_cols).head(n).reset_index(drop=True)
+        except ValueError:
+            pass
+    return grouped
+
+def kpi_count_share_quarterly(df: pd.DataFrame, asset_status: str, var_col: str, bike_or_car: str = "CAR", top_n: str = "1", period_mode: str = "quarterly") -> pd.DataFrame:
     out = df.copy()
     out = out[
         (out["NOVA_ASSET_STATUS"].astype(str).str.contains(asset_status, na=False))
@@ -1859,22 +1827,24 @@ def kpi_count_share_quarterly(df: pd.DataFrame, asset_status: str, var_col: str,
 
     out = out.copy()
     out["MONTH"] = out["MONTH"].astype(int)
-    out["Quarter"] = "Q" + (((out["MONTH"] - 1) // 3) + 1).astype(str)
+    if period_mode == "monthly":
+        out["PERIOD"] = out["MONTH"].astype(str).str.zfill(2)
+    elif period_mode == "yearly":
+        out["PERIOD"] = "ALL"
+    else:
+        out["PERIOD"] = "Q" + (((out["MONTH"] - 1) // 3) + 1).astype(str)
 
-    grouped = out.groupby(["COUNTRY", var_col, "YEAR", "Quarter"]).size().reset_index(name="VOLUME")
-    grouped = grouped.sort_values(["COUNTRY", "YEAR", "Quarter", "VOLUME"], ascending=[True, True, True, False])
+    grouped = out.groupby(["COUNTRY", var_col, "YEAR", "PERIOD"]).size().reset_index(name="VOLUME")
+    grouped = grouped.sort_values(["COUNTRY", "YEAR", "PERIOD", "VOLUME"], ascending=[True, True, True, False])
     
-    # Calculate total before filtering for top brand
-    grouped["TOTAL"] = grouped.groupby(["COUNTRY", "YEAR", "Quarter"])["VOLUME"].transform("sum")
+    # Calculate total before filtering
+    grouped["TOTAL"] = grouped.groupby(["COUNTRY", "YEAR", "PERIOD"])["VOLUME"].transform("sum")
     grouped["SHARE"] = grouped["VOLUME"].div(grouped["TOTAL"].where(grouped["TOTAL"] != 0, 1)).mul(100)
 
-    if show_top_only:
-        grouped = grouped.groupby(["COUNTRY", "YEAR", "Quarter"]).head(1).reset_index(drop=True)
-
-    return grouped
+    return apply_top_n_filter(grouped, top_n, ["COUNTRY", "YEAR", "PERIOD"])
 
 
-def kpi_count_share_quarterly_market(df: pd.DataFrame, var_col: str, show_top_only: bool = False) -> pd.DataFrame:
+def kpi_count_share_quarterly_market(df: pd.DataFrame, var_col: str, top_n: str = "1", period_mode: str = "quarterly") -> pd.DataFrame:
     out = df.copy()
     if out.empty:
         return pd.DataFrame()
@@ -1884,38 +1854,26 @@ def kpi_count_share_quarterly_market(df: pd.DataFrame, var_col: str, show_top_on
         return pd.DataFrame()
 
     out["YEAR"] = out["date"].dt.year
-    out["Quarter"] = out["date"].dt.to_period("Q").astype(str).str[-2:] # Extract Q1, Q2...
+    if period_mode == "monthly":
+        out["PERIOD"] = out["date"].dt.month.astype(str).str.zfill(2)
+    elif period_mode == "yearly":
+        out["PERIOD"] = "ALL"
+    else:
+        out["PERIOD"] = out["date"].dt.to_period("Q").astype(str).str[-2:] # Extract Q1, Q2...
 
-    grouped = out.groupby([var_col, "YEAR", "Quarter"])["volume"].sum().reset_index(name="VOLUME")
-    grouped = grouped.sort_values(["YEAR", "Quarter", "VOLUME"], ascending=[True, True, False])
+    grouped = out.groupby([var_col, "YEAR", "PERIOD"])["volume"].sum().reset_index(name="VOLUME")
+    grouped = grouped.sort_values(["YEAR", "PERIOD", "VOLUME"], ascending=[True, True, False])
     
-    # Calculate total before filtering for top brand
-    grouped["TOTAL"] = grouped.groupby(["YEAR", "Quarter"])["VOLUME"].transform("sum")
+    # Calculate total before filtering
+    grouped["TOTAL"] = grouped.groupby(["YEAR", "PERIOD"])["VOLUME"].transform("sum")
     grouped["SHARE"] = grouped["VOLUME"].div(grouped["TOTAL"].where(grouped["TOTAL"] != 0, 1)).mul(100)
 
-    if show_top_only:
-        grouped = grouped.groupby(["YEAR", "Quarter"]).head(1).reset_index(drop=True)
-
-    return grouped
+    return apply_top_n_filter(grouped, top_n, ["YEAR", "PERIOD"])
 
 
-def kpi_count_share_monthly(df: pd.DataFrame, asset_status: str, var_col: str, bike_or_car: str = "CAR") -> pd.DataFrame:
-    out = df.copy()
-    out = out[
-        (out["NOVA_ASSET_STATUS"].astype(str).str.contains(asset_status, na=False))
-        & (out["BIKE_OR_CAR"].astype(str) == bike_or_car)
-    ]
-    out = out.dropna(subset=["MONTH", "YEAR", var_col])
-    if out.empty:
-        return pd.DataFrame()
-
-    grouped = out.groupby([var_col, "YEAR", "MONTH"]).size().reset_index(name="VOLUME")
-    grouped["TOTAL"] = grouped.groupby(["YEAR", "MONTH"])["VOLUME"].transform("sum")
-    grouped["SHARE"] = grouped["VOLUME"].div(grouped["TOTAL"].where(grouped["TOTAL"] != 0, 1)).mul(100)
-    return grouped
 
 
-def kpi_count_share_ytd_by_quarter(df: pd.DataFrame, asset_status: str, var_col: str, bike_or_car: str = "CAR", show_top_only: bool = False) -> pd.DataFrame:
+def kpi_count_share_ytd_by_quarter(df: pd.DataFrame, asset_status: str, var_col: str, bike_or_car: str = "CAR", top_n: str = "1", period_mode: str = "quarterly") -> pd.DataFrame:
     out = df.copy()
     out = out[
         (out["NOVA_ASSET_STATUS"].astype(str).str.contains(asset_status, na=False))
@@ -1928,35 +1886,41 @@ def kpi_count_share_ytd_by_quarter(df: pd.DataFrame, asset_status: str, var_col:
 
     out = out.copy()
     out["MONTH"] = out["MONTH"].astype(int)
-    out["Quarter"] = "Q" + (((out["MONTH"] - 1) // 3) + 1).astype(str)
+    if period_mode == "monthly":
+        out["PERIOD"] = out["MONTH"].astype(str).str.zfill(2)
+    elif period_mode == "yearly":
+        out["PERIOD"] = "ALL"
+    else:
+        out["PERIOD"] = "Q" + (((out["MONTH"] - 1) // 3) + 1).astype(str)
+    
     out["VOLUME_INC"] = 1
     out = out.sort_values(["COUNTRY", var_col, "YEAR", "MONTH"])
     out["VOLUME_YTD"] = out.groupby(["COUNTRY", var_col, "YEAR"])["VOLUME_INC"].cumsum()
 
     grouped = (
-        out.groupby(["COUNTRY", var_col, "YEAR", "Quarter"], as_index=False)
+        out.groupby(["COUNTRY", var_col, "YEAR", "PERIOD"], as_index=False)
         .agg(VOLUME_YTD=("VOLUME_YTD", "max"))
     )
-    grouped = grouped.sort_values(["COUNTRY", "YEAR", "Quarter", "VOLUME_YTD"], ascending=[True, True, True, False])
+    grouped = grouped.sort_values(["COUNTRY", "YEAR", "PERIOD", "VOLUME_YTD"], ascending=[True, True, True, False])
     
-    # Calculate total before filtering for top brand
-    grouped["TOTAL_YTD"] = grouped.groupby(["COUNTRY", "YEAR", "Quarter"])["VOLUME_YTD"].transform("sum")
+    # Calculate total before filtering
+    grouped["TOTAL_YTD"] = grouped.groupby(["COUNTRY", "YEAR", "PERIOD"])["VOLUME_YTD"].transform("sum")
     grouped["SHARE_YTD"] = grouped["VOLUME_YTD"].div(grouped["TOTAL_YTD"].where(grouped["TOTAL_YTD"] != 0, 1)).mul(100)
 
-    if show_top_only:
-        grouped = grouped.groupby(["COUNTRY", "YEAR", "Quarter"]).head(1).reset_index(drop=True)
-
-    return grouped
+    return apply_top_n_filter(grouped, top_n, ["COUNTRY", "YEAR", "PERIOD"])
 
 
-def plot_kpi_share(df_plot: pd.DataFrame, col: str) -> go.Figure:
+def plot_kpi_share(df_plot: pd.DataFrame, col: str, period_mode: str = "quarterly") -> go.Figure:
     out = df_plot.copy()
     if out.empty:
         fig = go.Figure()
-        fig.update_layout(title=f"Market Share by {col} (Quarterly, all countries)")
+        fig.update_layout(title=f"Market Share by {col} ({period_mode.capitalize()}, all countries)")
         return fig
 
-    out["TIME"] = out["YEAR"].astype(str) + "-" + out["Quarter"].astype(str)
+    if period_mode == "yearly":
+        out["TIME"] = out["YEAR"].astype(str)
+    else:
+        out["TIME"] = out["YEAR"].astype(str) + "-" + out["PERIOD"].astype(str)
 
     agg = out.groupby(["TIME", col], as_index=False)["VOLUME"].sum()
     total = agg.groupby("TIME", as_index=False)["VOLUME"].sum().rename(columns={"VOLUME": "TOTAL_VOLUME"})
@@ -2073,6 +2037,9 @@ def kpi_top_brand_vs_market(df_portfolio: pd.DataFrame, df_market: pd.DataFrame,
     if bev_only:
         df_port = df_port[df_port["POWER_CATEGORY"].astype(str).str.contains("ELECTRIC", case=False, na=False)]
 
+    # Apply unique key logic for Portfolio (per quarter)
+    df_port = get_kpi_data(df_port, extra_keys=["QUARTER"])
+
     # Market preparation
     df_mkt = df_market.copy()
     df_mkt["QUARTER"] = pd.to_datetime(df_mkt["date"]).dt.to_period('Q').astype(str)
@@ -2174,8 +2141,10 @@ def kpi_top_per_quarter_with_share(
     var_col: str,
     bike_or_car: str = "CAR",
     metric_mode: str = "share",
+    top_n: str = "1",
+    period_mode: str = "quarterly",
 ) -> pd.DataFrame:
-    """Compute top variable per quarter with volume and share. Returns rows per country."""
+    """Compute top variable per period with volume and share. Returns rows per country."""
     out = df.copy()
     out = out[
         (out["NOVA_ASSET_STATUS"].astype(str).str.contains(asset_status, na=False))
@@ -2185,30 +2154,43 @@ def kpi_top_per_quarter_with_share(
         return pd.DataFrame()
 
     out["YEAR"] = out["COB_DATE"].dt.year.astype(int)
-    out["Q"] = "Q" + (((out["COB_DATE"].dt.month - 1) // 3) + 1).astype(str)
-    out["PERIOD"] = out["YEAR"].astype(str) + "_" + out["Q"]
+    if period_mode == "monthly":
+        out["PERIOD"] = out["YEAR"].astype(str) + "_" + out["COB_DATE"].dt.month.astype(str).str.zfill(2)
+    elif period_mode == "yearly":
+        out["PERIOD"] = out["YEAR"].astype(str)
+    else:
+        out["Q"] = "Q" + (((out["COB_DATE"].dt.month - 1) // 3) + 1).astype(str)
+        out["PERIOD"] = out["YEAR"].astype(str) + "_" + out["Q"]
 
+    # Compute top N
     rows: list[dict] = []
+    
+    n_limit = 1
+    if str(top_n).upper() != "ALL":
+        try:
+            n_limit = int(top_n)
+        except:
+            n_limit = 1
+    else:
+        n_limit = 99999
+
     for country in sorted(out["COUNTRY"].dropna().unique().tolist()):
         country_df = out[out["COUNTRY"] == country]
         row_data: dict[str, str | int | float | None] = {"COUNTRY": country}
         for period in sorted(country_df["PERIOD"].dropna().unique().tolist()):
             period_df = country_df[country_df["PERIOD"] == period]
-            counts = period_df.groupby(var_col).size()
+            counts = period_df.groupby(var_col).size().sort_values(ascending=False)
             total_volume = int(counts.sum())
 
             if counts.empty or total_volume == 0:
-                top_var = None
-                top_volume = 0
-                top_share = 0.0
+                pass
             else:
-                top_var = str(counts.idxmax())
-                top_volume = int(counts.max())
-                top_share = round((top_volume / total_volume) * 100, 2)
-
-            row_data[f"{period}_VAR"] = top_var
-            row_data[f"{period}_VOLUME"] = top_volume
-            row_data[f"{period}_SHARE"] = top_share
+                top_items = counts.head(n_limit)
+                for i, (var, vol) in enumerate(top_items.items()):
+                    suffix = f"_{i+1}" if n_limit > 1 else ""
+                    row_data[f"{period}{suffix}_VAR"] = str(var)
+                    row_data[f"{period}{suffix}_VOLUME"] = int(vol)
+                    row_data[f"{period}{suffix}_SHARE"] = round((vol / total_volume) * 100, 2)
         rows.append(row_data)
 
     out_df = pd.DataFrame(rows)
@@ -2324,18 +2306,18 @@ def prepare_market_concentration_source(df: pd.DataFrame, variable: str) -> tupl
     return out, variable
 
 
-CONCENTRATION_STATUS_OPTIONS = ["IN FLEET", "ORDER", "ORDER YTD"]
+CONCENTRATION_STATUS_OPTIONS = ["IN FLEET", "ORDER", "ORDER YTD", "DEHIRE"]
 CONCENTRATION_VARIABLE_OPTIONS_PORTFOLIO = [
     {"label": "Brand", "value": "BRAND_UPDATE"},
     {"label": "OEM", "value": "OEM_UPDATE"},
     {"label": "CO2 Bucket", "value": "CO2_BUCKET"},
-    {"label": "Highest BEV Brand", "value": "HIGHEST_BEV"},
+    {"label": "BEV", "value": "HIGHEST_BEV"},
 ]
 CONCENTRATION_VARIABLE_OPTIONS_MARKET = [
     {"label": "Make", "value": "BRAND_UPDATE"},
     {"label": "Make Group", "value": "OEM_UPDATE"},
     {"label": "CO2 Bucket", "value": "CO2_BUCKET"},
-    {"label": "Highest BEV Brand", "value": "HIGHEST_BEV"},
+    {"label": "BEV", "value": "HIGHEST_BEV"},
 ]
 CONCENTRATION_SOURCE_OPTIONS = ["portfolio", "market"]
 
@@ -2469,6 +2451,18 @@ app.layout = html.Div(
                             value=["annually"],
                             labelStyle={"display": "inline-block", "marginRight": "12px", "padding": "4px 0"}
                         ),
+                        html.Div("Date Rule", className="filter-label", style={"marginTop": "16px", "fontWeight": "bold"}),
+                        dcc.Dropdown(
+                            id="report-modal-date-mode",
+                            options=[
+                                {"label": "None (Current Fleet)", "value": "NONE"},
+                                {"label": "Contract Start Date", "value": "CONTRACT_START_DATE"},
+                                {"label": "Delivery Date", "value": "DELIVERY_DATE"}
+                            ],
+                            value="NONE",
+                            clearable=False,
+                            style={"width": "100%"}
+                        ),
                         html.Div(
                             style={"display": "flex", "justifyContent": "space-between", "marginTop": "24px"},
                             children=[
@@ -2485,6 +2479,9 @@ app.layout = html.Div(
     className="page-wrap",
 )
 
+# =============================================================================
+# 7. LAYOUT & UI DEFINITIONS
+# =============================================================================
 
 def view1_layout() -> html.Div:
     return html.Div(
@@ -2531,11 +2528,28 @@ def view1_layout() -> html.Div:
                             dcc.Dropdown(
                                 id="kpi-date-mode-filter",
                                 options=[
-                                    {"label": "None", "value": "NONE"},
-                                    {"label": "Contract start date", "value": "CONTRACT_START_DATE"},
-                                    {"label": "Delivery date", "value": "DELIVERY_DATE"},
+                                    {"label": "None (Current Fleet)", "value": "NONE"},
+                                    {"label": "Contract Start Date", "value": "CONTRACT_START_DATE"},
+                                    {"label": "Delivery Date", "value": "DELIVERY_DATE"},
                                 ],
                                 value="NONE",
+                                clearable=False,
+                            ),
+                        ],
+                        className="filter-box",
+                    ),
+                    html.Div(
+                        [
+                            html.Div("Asset Status", className="filter-label"),
+                            dcc.Dropdown(
+                                id="status-filter",
+                                options=[
+                                    {"label": "IN FLEET", "value": "IN FLEET"},
+                                    {"label": "CONTAINS ORDER", "value": "ORDER"},
+                                    {"label": "DEHIRE", "value": "DEHIRE"},
+                                    {"label": "ALL", "value": "ALL"},
+                                ],
+                                value="IN FLEET",
                                 clearable=False,
                             ),
                         ],
@@ -3119,12 +3133,36 @@ def view5_layout() -> html.Div:
                             ),
                             html.Div(
                                 [
-                                    html.Div("Top Brand Only", className="filter-label"),
-                                    dcc.Checklist(
-                                        id="v5-top-only-toggle",
-                                        options=[{"label": " Enabled", "value": "top"}],
-                                        value=[],
-                                        className="dash-checklist",
+                                    html.Div("Period", className="filter-label"),
+                                    dcc.Dropdown(
+                                        id="v5-period-filter",
+                                        options=[{"label": "Monthly", "value": "monthly"}, {"label": "Quarterly", "value": "quarterly"}, {"label": "Yearly", "value": "yearly"}],
+                                        value="quarterly",
+                                        clearable=False,
+                                    ),
+                                ],
+                                className="filter-box",
+                            ),
+                            html.Div(
+                                [
+                                    html.Div("Top N", className="filter-label"),
+                                    dcc.Input(
+                                        id="v5-top-n-filter",
+                                        type="text",
+                                        value="1",
+                                        placeholder="All, 1, 5...",
+                                        list="top-n-options-v5",
+                                        className="dash-input",
+                                    ),
+                                    html.Datalist(
+                                        id="top-n-options-v5",
+                                        children=[
+                                            html.Option(value="1"),
+                                            html.Option(value="5"),
+                                            html.Option(value="10"),
+                                            html.Option(value="20"),
+                                            html.Option(value="All"),
+                                        ]
                                     ),
                                 ],
                                 className="filter-box",
@@ -3189,6 +3227,42 @@ def view5_layout() -> html.Div:
                                         value="share",
                                         inline=True,
                                         labelStyle={"marginRight": "18px"},
+                                    ),
+                                ],
+                                className="filter-box",
+                            ),
+                            html.Div(
+                                [
+                                    html.Div("Period", className="filter-label"),
+                                    dcc.Dropdown(
+                                        id="v6-period-filter",
+                                        options=[{"label": "Monthly", "value": "monthly"}, {"label": "Quarterly", "value": "quarterly"}, {"label": "Yearly", "value": "yearly"}],
+                                        value="quarterly",
+                                        clearable=False,
+                                    ),
+                                ],
+                                className="filter-box",
+                            ),
+                            html.Div(
+                                [
+                                    html.Div("Top N", className="filter-label"),
+                                    dcc.Input(
+                                        id="v6-top-n-filter",
+                                        type="text",
+                                        value="1",
+                                        placeholder="All, 1, 5...",
+                                        list="top-n-options-v6",
+                                        className="dash-input",
+                                    ),
+                                    html.Datalist(
+                                        id="top-n-options-v6",
+                                        children=[
+                                            html.Option(value="1"),
+                                            html.Option(value="5"),
+                                            html.Option(value="10"),
+                                            html.Option(value="20"),
+                                            html.Option(value="All"),
+                                        ]
                                     ),
                                 ],
                                 className="filter-box",
@@ -3269,6 +3343,9 @@ def view6_layout() -> html.Div:
         ]
     )
 
+# =============================================================================
+# 8. DASH CALLBACKS (INTERACTIVITY)
+# =============================================================================
 
 @app.callback(Output("page-content", "children"), Input("url", "pathname"))
 def render_page(pathname: str):
@@ -3310,47 +3387,43 @@ def update_month_filter(country: str, year: int | str):
     Output("kpi1-country-filter", "value"),
     Output("kpi1-year-filter", "value"),
     Output("kpi1-month-filter", "value"),
+    Output("kpi1-date-mode-filter", "value"),
     Output("kpi2-country-filter", "value"),
     Output("kpi2-year-filter", "value"),
     Output("kpi2-month-filter", "value"),
+    Output("kpi2-date-mode-filter", "value"),
     Output("kpi3-country-filter", "value"),
     Output("kpi3-year-filter", "value"),
     Output("kpi3-month-filter", "value"),
+    Output("kpi3-date-mode-filter", "value"),
     Output("kpi4-country-filter", "value"),
     Output("kpi4-year-filter", "value"),
     Output("kpi4-month-filter", "value"),
+    Output("kpi4-date-mode-filter", "value"),
     Output("kpi5-country-filter", "value"),
     Output("kpi5-year-filter", "value"),
     Output("kpi5-month-filter", "value"),
+    Output("kpi5-date-mode-filter", "value"),
     Output("kpi6-country-filter", "value"),
     Output("kpi6-year-filter", "value"),
     Output("kpi6-month-filter", "value"),
+    Output("kpi6-date-mode-filter", "value"),
     Input("country-filter", "value"),
     Input("year-filter", "value"),
     Input("month-filter", "value"),
+    Input("kpi-date-mode-filter", "value"),
     prevent_initial_call=True,
 )
-def sync_top_filters_to_cards(country: str, year: int | str, month_value: int | str):
-    month = month_value
+def sync_top_filters_to_cards(country: str, year: int | str, month_value: int | str, date_mode: str):
+    m = month_value
+    dm = date_mode
     return (
-        country,
-        year,
-        month,
-        country,
-        year,
-        month,
-        country,
-        year,
-        month,
-        country,
-        year,
-        month,
-        country,
-        year,
-        month,
-        country,
-        year,
-        month,
+        country, year, m, dm,
+        country, year, m, dm,
+        country, year, m, dm,
+        country, year, m, dm,
+        country, year, m, dm,
+        country, year, m, dm,
     )
 
 
@@ -3388,6 +3461,7 @@ def sync_top_filters_to_cards(country: str, year: int | str, month_value: int | 
     State("kpi6-date-mode-filter", "value"),
     State("kpi-common-bike-or-car-filter", "value"),
     State("kpi-date-mode-filter", "value"),
+    State("status-filter", "value"),
     prevent_initial_call=True,
 )
 def update_kpi_cards(
@@ -3418,6 +3492,7 @@ def update_kpi_cards(
     kpi6_dm: str,
     kpi_common_bike_or_car: str,
     date_mode: str,
+    status_filter: str,
 ):
     required_filters = [
         kpi1_country, kpi1_year,
@@ -3459,23 +3534,39 @@ def update_kpi_cards(
         kpi4_dm,
         kpi5_dm,
         kpi6_dm,
+        status_filter
     )
 
-    kpi1 = cast(float | None, metrics["kpi1"])
-    kpi2 = cast(float | None, metrics["kpi2"])
-    diesel_share, non_diesel_share = cast(tuple[float | None, float | None], metrics["diesel_non"])
-    hybrid_share = cast(float | None, metrics["hybrid"])
-    ev_share = cast(float | None, metrics["ev"])
-    pv_share, lcv_share = cast(tuple[float | None, float | None], metrics["pv_lcv"])
+    kpi1_val = metrics["kpi1"]
+    kpi2_val = metrics["kpi2"]
+    diesel_val = metrics["diesel_non"]
+    hybrid_val = metrics["hybrid"]
+    ev_val = metrics["ev"]
+    pv_lcv_val = metrics["pv_lcv"]
 
-    card1 = build_card_body(percent_or_na_precision(kpi1, 2), "LTR < 25 | Asset status: IN FLEET", "#1d5f99")
-    card2 = build_card_body(percent_or_na_precision(kpi2, 2), "LTR [25-30] | Asset status: IN FLEET", "#2f855a")
-    card3 = build_card_body(f"{percent_or_na_precision(diesel_share, 2)} / {percent_or_na_precision(non_diesel_share, 2)}", "DI vs Non-DI | Asset status: IN FLEET", "#d98943")
-    card4 = build_card_body(percent_or_na_precision(hybrid_share, 2), "HEV + PHEV share | Asset status: IN FLEET", "#b08b2f")
-    card5 = build_card_body(percent_or_na_precision(ev_share, 2), "Electric share | Asset status: IN FLEET", "#2f7f5f")
-    card6 = build_card_body(f"{percent_or_na_precision(pv_share, 2)} / {percent_or_na_precision(lcv_share, 2)}", "PV vs LCV share | Asset status: IN FLEET", "#d64545")
+    # Mapping internal metric keys to registry keys
+    results = {
+        "kpi1": kpi1_val,
+        "kpi2": kpi2_val,
+        "kpi3": diesel_val,
+        "kpi4": hybrid_val,
+        "kpi5": ev_val,
+        "kpi6": pv_lcv_val
+    }
 
-    return card1, card2, card3, card4, card5, card6
+    cards = []
+    for kid, config in KPI_REGISTRY.items():
+        val = results.get(kid)
+        display_val = "N/A"
+        if val is not None:
+            if isinstance(val, tuple):
+                display_val = f"{percent_or_na_precision(val[0], 2)} / {percent_or_na_precision(val[1], 2)}"
+            else:
+                display_val = percent_or_na_precision(val, 2)
+        
+        cards.append(build_card_body(display_val, f"{config['label']} | Status: {status_filter}", config['color']))
+
+    return tuple(cards)
 
 
 @app.callback(
@@ -4091,6 +4182,9 @@ def update_view4_kpi10(_refresh_clicks: int, country: str, status: str, bike_or_
 
     out["Quarter"] = out["CONTRACT_FINAL_END"].dt.to_period("Q").astype(str)
 
+    # Apply unique key logic (per quarter)
+    out = get_kpi_data(out, extra_keys=["QUARTER"])
+    
     pivot = out.pivot_table(
         index="Quarter",
         columns="VEHICLE_MODEL_MAPED",
@@ -4162,30 +4256,30 @@ def update_view4_kpi10(_refresh_clicks: int, country: str, status: str, bike_or_
     State("v5-status-filter", "value"),
     State("v5-source-filter", "value"),
     State("v5-variable-filter", "value"),
-    State("v5-top-only-toggle", "value"),
+    State("v5-top-n-filter", "value"),
+    State("v5-period-filter", "value"),
     prevent_initial_call=True,
 )
-def update_view5_kpi11(_refresh_clicks: int, status_value: str, source_value: str, variable: str, top_only_val: list[str]):
+def update_view5_kpi11(_refresh_clicks: int, status_value: str, source_value: str, variable: str, top_n_val: str, period_mode: str):
     if has_missing_filters(status_value, source_value, variable):
         empty_fig = go.Figure()
         empty_fig.update_layout(title="KPI 11 - Sélectionnez les filtres puis cliquez sur Reload")
         return empty_fig, html.Div("Sélectionnez les filtres puis cliquez sur Reload.", className="small-note")
 
-    top_only = "top" in (top_only_val or [])
+    top_n_val = top_n_val or "ALL"
 
     if source_value == "market":
         market_ready, market_var = prepare_market_concentration_source(market_df, variable)
-        # Use long format for consistency with portfolio in View 5
-        kpi11_table_long = kpi_count_share_quarterly_market(market_ready, market_var, show_top_only=top_only)
-        fig = plot_kpi_share(kpi11_table_long, market_var)
+        kpi11_table_long = kpi_count_share_quarterly_market(market_ready, market_var, top_n=top_n_val, period_mode=period_mode)
+        fig = plot_kpi_share(kpi11_table_long, market_var, period_mode)
         kpi11_table = kpi11_table_long 
     else:
         portfolio_ready, portfolio_var = prepare_portfolio_concentration_source(df, variable)
         if "YTD" in status_value.upper():
-            kpi11_table = kpi_count_share_ytd_by_quarter(portfolio_ready, asset_status=status_value.replace(" YTD", ""), var_col=portfolio_var, bike_or_car="CAR", show_top_only=top_only)
+            kpi11_table = kpi_count_share_ytd_by_quarter(portfolio_ready, asset_status=status_value.replace(" YTD", ""), var_col=portfolio_var, bike_or_car="CAR", top_n=top_n_val, period_mode=period_mode)
             plot_df = kpi11_table.rename(columns={"VOLUME_YTD": "VOLUME", "SHARE_YTD": "SHARE"}).copy()
         else:
-            kpi11_table = kpi_count_share_quarterly(portfolio_ready, asset_status=status_value, var_col=portfolio_var, bike_or_car="CAR", show_top_only=top_only)
+            kpi11_table = kpi_count_share_quarterly(portfolio_ready, asset_status=status_value, var_col=portfolio_var, bike_or_car="CAR", top_n=top_n_val, period_mode=period_mode)
             plot_df = kpi11_table.copy()
 
         if plot_df.empty:
@@ -4193,7 +4287,7 @@ def update_view5_kpi11(_refresh_clicks: int, status_value: str, source_value: st
             empty_fig.update_layout(title="KPI 11 - No data")
             return empty_fig, html.Div("No data available for the selected filters.", className="small-note")
 
-        fig = plot_kpi_share(plot_df, portfolio_var)
+        fig = plot_kpi_share(plot_df, portfolio_var, period_mode)
 
     if kpi11_table.empty:
         return fig, html.Div("No data available for the selected filters.", className="small-note")
@@ -4209,18 +4303,22 @@ def update_view5_kpi11(_refresh_clicks: int, status_value: str, source_value: st
     State("v6-source-filter", "value"),
     State("v6-variable-filter", "value"),
     State("v6-metric-mode-filter", "value"),
+    State("v6-top-n-filter", "value"),
+    State("v6-period-filter", "value"),
     prevent_initial_call=True,
 )
-def update_view6_kpi6(_refresh_clicks: int, status_value: str, source_value: str, variable: str, metric_mode: str):
+def update_view6_kpi6(_refresh_clicks: int, status_value: str, source_value: str, variable: str, metric_mode: str, top_n_val: str, period_mode: str):
     if has_missing_filters(status_value, source_value, variable, metric_mode):
         return html.Div("Sélectionnez les filtres puis cliquez sur Reload.", className="small-note")
 
+    top_n_val = top_n_val or "ALL"
+
     if source_value == "market":
         market_ready, market_var = prepare_market_concentration_source(market_df, variable)
-        kpi6_table = kpi_top_per_quarter_with_share_market(market_ready, market_var, metric_mode=metric_mode)
+        kpi6_table = kpi_top_per_quarter_with_share_market(market_ready, market_var, metric_mode=metric_mode, top_n=top_n_val, period_mode=period_mode)
     else:
         portfolio_ready, portfolio_var = prepare_portfolio_concentration_source(df, variable)
-        kpi6_table = kpi_top_per_quarter_with_share(portfolio_ready, asset_status=status_value, var_col=portfolio_var, bike_or_car="CAR", metric_mode=metric_mode)
+        kpi6_table = kpi_top_per_quarter_with_share(portfolio_ready, asset_status=status_value, var_col=portfolio_var, bike_or_car="CAR", metric_mode=metric_mode, top_n=top_n_val, period_mode=period_mode)
 
     if kpi6_table.empty:
         return html.Div("No data available for the selected filters.", className="small-note")
@@ -4344,6 +4442,7 @@ def build_interactive_complete_report(
     status_group: str,
     selected_years: list[str],
     selected_periods: list[str],
+    date_mode: str = "NONE",
     kpi1_limit: float | None = 25.0,
     kpi2_limit: float | None = 30.0,
 ) -> str:
@@ -4446,161 +4545,91 @@ def build_interactive_complete_report(
                 # Resolve month value for snapshot KPIs
                 resolved_month = resolve_month_value(country, year, month_val)
                 
-                # --- CALCULATE DATA ---
-                kpi1_val = kpi_lease_under_25(df, country, year, resolved_month, bike_or_car)
-                kpi2_val = kpi_lease_25_30(df, country, year, resolved_month, bike_or_car)
-                diesel_non = kpi_diesel_non_diesel(df, country, year, resolved_month, bike_or_car)
-                hybrid_val = kpi_hybrid_share(df, country, year, resolved_month, bike_or_car)
-                ev_val = kpi_ev_share(df, country, year, resolved_month, bike_or_car)
-                pv_lcv_val = kpi_pv_lcv(df, country, year, resolved_month, bike_or_car)
+                # --- CALCULATE DATA DYNAMICALLY ---
+                results = {}
+                for kid, config in KPI_REGISTRY.items():
+                    func = globals().get(config["func_name"])
+                    if func:
+                        results[kid] = func(df, country, year, resolved_month, bike_or_car, date_mode)
+                    else:
+                        results[kid] = None
                 
-                kpi_vol = kpi_selected_volume(df, country, year, resolved_month, status="IN FLEET", bike_or_car=bike_or_car)
+                kpi_vol = kpi_selected_volume(df, country, year, resolved_month, status="IN FLEET", bike_or_car=bike_or_car, date_mode=date_mode)
                 
-                # --- BUILD HTML BLOCK ---
-                block = f'<div class="report-block" data-year="{year}" data-gran="{gran}" data-sub="{sub}" style="display: none;">'
+                # Period label for summary
+                if gran == "quarterly":
+                    period_display = f"{sub} {year}"
+                elif gran == "monthly":
+                    period_display = summary_month_label(year, int(month_val))
+                else:
+                    period_display = str(year)
                 
-                # KPI Cards (1-6)
-                kpi_cards = [
-                    {
-                        "label": "KPI 1 - LTR < 25",
-                        "result": percent_or_na_precision(kpi1_val, 2),
-                        "status": kpi_limit_status(kpi1_val, kpi1_limit),
+                # --- BUILD KPI CARDS DYNAMICALLY ---
+                kpi_cards = []
+                for kid, config in KPI_REGISTRY.items():
+                    val = results[kid]
+                    limit = config["limit"]
+                    
+                    display_val = "N/A"
+                    status = "neutral"
+                    if val is not None:
+                        if isinstance(val, tuple):
+                            display_val = f"{percent_or_na_precision(val[0], 2)} / {percent_or_na_precision(val[1], 2)}"
+                        else:
+                            display_val = percent_or_na_precision(val, 2)
+                            status = kpi_limit_status(val, limit)
+                    
+                    kpi_cards.append({
+                        "label": config["label"],
+                        "result": display_val,
+                        "status": status,
                         "show_legend": True,
                         "params": [
                             ("Country", country),
-                            ("Period", f"{year} - {sub}"),
+                            ("Period", period_display),
                             ("Vehicle type", bike_or_car),
                             ("Asset status", status_group),
                             ("Volume", format_volume(kpi_vol)),
-                            ("Limit", "5%" if kpi1_limit is None else f"{kpi1_limit}%"),
                         ],
-                    },
-                    {
-                        "label": "KPI 2 - LTR [25-30]",
-                        "result": percent_or_na_precision(kpi2_val, 2),
-                        "status": kpi_limit_status(kpi2_val, kpi2_limit),
-                        "show_legend": True,
-                        "params": [
-                            ("Country", country),
-                            ("Period", f"{year} - {sub}"),
-                            ("Vehicle type", bike_or_car),
-                            ("Asset status", status_group),
-                            ("Volume", format_volume(kpi_vol)),
-                            ("Limit", "10%" if kpi2_limit is None else f"{kpi2_limit}%"),
-                        ],
-                    },
-                    {
-                        "label": "KPI 3 - DI vs Non-DI",
-                        "result": f"{percent_or_na_precision(diesel_non[0], 2)} / {percent_or_na_precision(diesel_non[1], 2)}" if diesel_non[0] is not None else "N/A",
-                        "status": "neutral",
-                        "params": [
-                            ("Country", country),
-                            ("Period", f"{year} - {sub}"),
-                            ("Vehicle type", bike_or_car),
-                            ("Asset status", status_group),
-                            ("Volume", format_volume(kpi_vol))
-                        ],
-                    },
-                    {
-                        "label": "KPI 4 - Hybrid share",
-                        "result": percent_or_na_precision(hybrid_val, 2),
-                        "status": "neutral",
-                        "params": [
-                            ("Country", country),
-                            ("Period", f"{year} - {sub}"),
-                            ("Vehicle type", bike_or_car),
-                            ("Asset status", status_group),
-                            ("Volume", format_volume(kpi_vol))
-                        ],
-                    },
-                    {
-                        "label": "KPI 5 - EV share",
-                        "result": percent_or_na_precision(ev_val, 2),
-                        "status": "neutral",
-                        "params": [
-                            ("Country", country),
-                            ("Period", f"{year} - {sub}"),
-                            ("Vehicle type", bike_or_car),
-                            ("Asset status", status_group),
-                            ("Volume", format_volume(kpi_vol))
-                        ],
-                    },
-                    {
-                        "label": "KPI 6 - PC vs LCV",
-                        "result": f"{percent_or_na_precision(pv_lcv_val[0], 2)} / {percent_or_na_precision(pv_lcv_val[1], 2)}" if pv_lcv_val[0] is not None else "N/A",
-                        "status": "neutral",
-                        "params": [
-                            ("Country", country),
-                            ("Period", f"{year} - {sub}"),
-                            ("Vehicle type", bike_or_car),
-                            ("Asset status", status_group),
-                            ("Volume", format_volume(kpi_vol))
-                        ],
-                    },
-                ]
+                    })
+                
                 cards_html = build_kpi_cards_section("Main KPIs", kpi_cards)
                 
-                kpi_rows = [
-                    {
-                        "label": "LTR < 25",
-                        "description": f"LTR <25 share, Limit {('N/A' if kpi1_limit is None else f'{float(kpi1_limit):g}%')}",
+                # --- BUILD SUMMARY TABLE DYNAMICALLY ---
+                kpi_rows = []
+                for kid, config in KPI_REGISTRY.items():
+                    val = results[kid]
+                    limit = config["limit"]
+                    
+                    display_val = "N/A"
+                    status = "neutral"
+                    if val is not None:
+                        if isinstance(val, tuple):
+                            display_val = f"{percent_or_na_precision(val[0], 2)} / {percent_or_na_precision(val[1], 2)}"
+                        else:
+                            display_val = percent_or_na_precision(val, 2)
+                            status = kpi_limit_status(val, limit)
+                    
+                    limit_desc = f", Limit {limit}%" if limit else ""
+                    
+                    kpi_rows.append({
+                        "label": config["label"].split(" - ")[-1], # Extract short name
+                        "description": config["description"] + limit_desc,
                         "country": country,
-                        "period": summary_month_label(year, None if month_val == "ALL" else int(month_val)),
-                        "result": percent_or_na_precision(kpi1_val, 2),
+                        "period": period_display,
+                        "result": display_val,
                         "volume": format_volume(kpi_vol),
-                        "signal": kpi_limit_status(kpi1_val, kpi1_limit),
-                    },
-                    {
-                        "label": "LTR [25-30]",
-                        "description": f"LTR [25-30] share, Limit {('N/A' if kpi2_limit is None else f'{float(kpi2_limit):g}%')}",
-                        "country": country,
-                        "period": summary_month_label(year, None if month_val == "ALL" else int(month_val)),
-                        "result": percent_or_na_precision(kpi2_val, 2),
-                        "volume": format_volume(kpi_vol),
-                        "signal": kpi_limit_status(kpi2_val, kpi2_limit),
-                    },
-                    {
-                        "label": "DI vs Non-DI",
-                        "description": "Total current fleet",
-                        "country": country,
-                        "period": summary_month_label(year, resolved_month),
-                        "result": f"{percent_or_na_precision(diesel_non[0], 2)} DI & {percent_or_na_precision(diesel_non[1], 2)} non-DI" if diesel_non[0] is not None else "N/A",
-                        "volume": format_volume(kpi_vol),
-                        "signal": "neutral",
-                    },
-                    {
-                        "label": "Hybrid share",
-                        "description": "Hyb (HEV + PHEV) In fleet",
-                        "country": country,
-                        "period": summary_month_label(year, resolved_month),
-                        "result": percent_or_na_precision(hybrid_val, 2),
-                        "volume": format_volume(kpi_vol),
-                        "signal": "neutral",
-                    },
-                    {
-                        "label": "EV share",
-                        "description": "EV share. In fleet",
-                        "country": country,
-                        "period": summary_month_label(year, resolved_month),
-                        "result": percent_or_na_precision(ev_val, 2),
-                        "volume": format_volume(kpi_vol),
-                        "signal": "neutral",
-                    },
-                    {
-                        "label": "PC vs LCV",
-                        "description": "PC vs LCV share, In fleet",
-                        "country": country,
-                        "period": summary_month_label(year, resolved_month),
-                        "result": f"{percent_or_na_precision(pv_lcv_val[0], 2)} PV & {percent_or_na_precision(pv_lcv_val[1], 2)} LCV" if pv_lcv_val[0] is not None else "N/A",
-                        "volume": format_volume(kpi_vol),
-                        "signal": "neutral",
-                    },
-                ]
+                        "signal": status,
+                    })
+                
                 summary_df = pd.DataFrame(kpi_rows)[["label", "country", "period", "result", "volume", "description", "signal"]]
                 summary_table_html = build_html_table_from_df(summary_df, "KPI summary table")
 
                 block += cards_html
                 block += summary_table_html
+                
+                body_html.append(block)
+                body_html.append("</div>") # Close report-block
 
                 kpi7_pivot, y_title7, x_title7, period_label7 = kpi7_fuel_by_period(
                     df, country, status_group, "share", gran, bike_or_car, "COB_DATE", f"{year}-01-01", f"{year}-12-31"
@@ -4630,21 +4659,23 @@ def build_interactive_complete_report(
     Input("download-complete-report-btn", "n_clicks"),
     State("report-modal-years", "value"),
     State("report-modal-periods", "value"),
+    State("report-modal-date-mode", "value"),
     State("country-filter", "value"),
     State("kpi-common-bike-or-car-filter", "value"),
     State("status-group-filter", "value"),
     prevent_initial_call=True
 )
-def generate_interactive_report_callback(n_clicks, selected_years, selected_periods, country, bike_or_car, status_group):
+def generate_interactive_report_callback(n_clicks, selected_years, selected_periods, date_mode, country, bike_or_car, status_group):
     if not selected_years or not selected_periods:
         return no_update
         
     country = country or "ALL"
     bike_or_car = bike_or_car or "CAR"
     status_group = status_group or "IN FLEET"
+    date_mode = date_mode or "NONE"
     
     html_content = build_interactive_complete_report(
-        country, bike_or_car, status_group, selected_years, selected_periods
+        country, bike_or_car, status_group, selected_years, selected_periods, date_mode
     )
     
     filename = f"Complete_Interactive_Report_{country}.html"
@@ -4653,6 +4684,7 @@ def generate_interactive_report_callback(n_clicks, selected_years, selected_peri
 
 if __name__ == "__main__":
     app.run(debug=True)
+
 
 
 
