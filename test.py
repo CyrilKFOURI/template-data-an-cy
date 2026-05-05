@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import calendar
@@ -2007,7 +2006,7 @@ def plot_top_var_kpi(df_kpi: pd.DataFrame, title_suffix: str = "") -> go.Figure:
     return fig
 
 
-def kpi_top_brand_vs_market(df_portfolio: pd.DataFrame, df_market: pd.DataFrame, var_col_portfolio: str, var_col_market: str, asset_status: str, reg_type: str = "Passenger Cars", bev_only: bool = False, top_n: str = "ALL", period_mode: str = "quarterly") -> pd.DataFrame:
+def kpi_top_brand_vs_market(df_portfolio: pd.DataFrame, df_market: pd.DataFrame, var_col_portfolio: str, var_col_market: str, asset_status: str, reg_type_portfolio: list | str = "ALL", reg_type_market: list | str = "ALL", bev_only: bool = False, top_n: str = "ALL", period_mode: str = "quarterly") -> pd.DataFrame:
     df_port = df_portfolio.copy()
     
     # Handle Period
@@ -2025,19 +2024,22 @@ def kpi_top_brand_vs_market(df_portfolio: pd.DataFrame, df_market: pd.DataFrame,
     if bev_only:
         df_port = df_port[df_port["POWER_CATEGORY"].astype(str).str.contains("ELECTRIC", case=False, na=False)]
     
-    # Handle ALL for Registration Type -> Portfolio Vehicle Type mapping
-    if reg_type != "ALL":
-        vtype_map = {"Passenger Cars": "PV", "Light Commercial Vehicle": "LCV"}
-        target_vtype = vtype_map.get(reg_type)
-        if target_vtype and "CLS_VEHICLE_TYPE" in df_port.columns:
-            df_port = df_port[df_port["CLS_VEHICLE_TYPE"] == target_vtype]
+    # Handle Registration Type for Portfolio
+    if reg_type_portfolio and reg_type_portfolio != "ALL" and reg_type_portfolio != ["ALL"]:
+        if isinstance(reg_type_portfolio, str):
+            reg_type_portfolio = [reg_type_portfolio]
+        if "CLS_VEHICLE_TYPE" in df_port.columns:
+            df_port = df_port[df_port["CLS_VEHICLE_TYPE"].isin(reg_type_portfolio)]
 
     df_port = get_kpi_data(df_port, extra_keys=["PERIOD"])
 
     df_mkt = df_market.copy()
-    # Handle ALL for Registration Type
-    if reg_type != "ALL" and "Registration Type" in df_mkt.columns:
-        df_mkt = df_mkt[df_mkt["Registration Type"] == reg_type]
+    # Handle Registration Type for Market
+    if reg_type_market and reg_type_market != "ALL" and reg_type_market != ["ALL"]:
+        if isinstance(reg_type_market, str):
+            reg_type_market = [reg_type_market]
+        if "Registration Type" in df_mkt.columns:
+            df_mkt = df_mkt[df_mkt["Registration Type"].isin(reg_type_market)]
     
     if period_mode == "monthly":
         df_mkt["PERIOD"] = pd.to_datetime(df_mkt["date"]).dt.strftime("%Y-%m")
@@ -2323,18 +2325,29 @@ CONCENTRATION_VARIABLE_OPTIONS_PORTFOLIO = [
     {"label": "BEV", "value": "HIGHEST_BEV"},
 ]
 CONCENTRATION_VARIABLE_OPTIONS_MARKET = [
-    {"label": "Make", "value": "BRAND_UPDATE"},
-    {"label": "Make Group", "value": "OEM_UPDATE"},
-    {"label": "CO2 Bucket", "value": "CO2_BUCKET"},
+    {"label": "Market Make", "value": "BRAND_UPDATE"},
+    {"label": "Market Make Group", "value": "OEM_UPDATE"},
+    {"label": "Market CO2 Bucket", "value": "CO2_BUCKET"},
     {"label": "BEV", "value": "HIGHEST_BEV"},
 ]
 CONCENTRATION_SOURCE_OPTIONS = ["portfolio", "market"]
 
+OWNER_TYPE_OPTIONS = [
+    {"label": "All", "value": "ALL"},
+    {"label": "Car manufacturer / dealer", "value": "Car manufacturer / dealer"},
+    {"label": "Company Cars", "value": "Company Cars"},
+    {"label": "Administration Govt.", "value": "Administration Govt."},
+    {"label": "Private", "value": "Private"},
+    {"label": "Rental", "value": "Rental"},
+    {"label": "Unspecified", "value": "Unspecified"}
+]
+
 MARKET_STATUS_OPTIONS = ["IN FLEET", "ORDER"]
 MARKET_VARIABLE_OPTIONS = [
-    {"label": "Brand", "value": "BRAND"},
-    {"label": "OEM", "value": "OEM"},
-    {"label": "BEV Only", "value": "BEV"},
+    {"label": "Brand", "value": "BRAND_UPDATE"},
+    {"label": "OEM", "value": "OEM_UPDATE"},
+    {"label": "BEV", "value": "HIGHEST_BEV"},
+    {"label": "CO2 Bucket", "value": "CO2_BUCKET"},
 ]
 
 
@@ -3191,10 +3204,19 @@ def view5_layout() -> html.Div:
                             ),
                             html.Div(
                                 [
-                                    html.Div("Variable", className="filter-label"),
+                                    html.Div("Variable", className="filter-label", id="v5-variable-filter-label"),
                                     dcc.Dropdown(id="v5-variable-filter", options=CONCENTRATION_VARIABLE_OPTIONS_PORTFOLIO, value=None, placeholder="Select variable", clearable=True),
                                 ],
                                 className="filter-box",
+                            ),
+                            html.Div(
+                                [
+                                    html.Div("Market owner", className="filter-label"),
+                                    dcc.Dropdown(id="v5-market-owner-filter", options=OWNER_TYPE_OPTIONS, value="ALL", placeholder="Select owner", clearable=False),
+                                ],
+                                className="filter-box",
+                                id="v5-market-owner-container",
+                                style={"display": "none"} # Hidden by default since source is portfolio
                             ),
                             html.Div(
                                 [
@@ -3375,30 +3397,46 @@ def view6_layout() -> html.Div:
                 [
                     html.Div(
                         [
-                            html.Div("Portfolio Status", className="filter-label"),
+                            html.Div("Portfolio Status type", className="filter-label"),
                             dcc.Dropdown(id="v6-kpi13-status-filter", options=[{"label": "ALL", "value": "ALL"}] + [{"label": s, "value": s} for s in CONCENTRATION_STATUS_OPTIONS], value="IN FLEET", placeholder="Select status", clearable=True),
                         ],
                         className="filter-box",
                     ),
                     html.Div(
                         [
-                            html.Div("Registration Type", className="filter-label"),
-                            dcc.Dropdown(id="v6-kpi13-regtype-filter", options=[
-                                {"label": "ALL", "value": "ALL"},
-                                {"label": "Passenger Cars", "value": "Passenger Cars"},
-                                {"label": "Light Commercial Vehicle", "value": "Light Commercial Vehicle"},
-                                {"label": "Heavy Commercial Vehicle", "value": "Heavy Commercial Vehicle"}
-                            ], value="Passenger Cars", placeholder="Select type", clearable=True),
+                            html.Div("Portfolio Registration type", className="filter-label"),
+                            dcc.Dropdown(id="v6-kpi13-port-regtype-filter", options=[
+                                {"label": "PV", "value": "PV"},
+                                {"label": "LCV", "value": "LCV"}
+                            ], value=["PV", "LCV"], multi=True, placeholder="Select type", clearable=True),
                         ],
                         className="filter-box",
                     ),
                     html.Div(
                         [
-                            html.Div("Variable", className="filter-label"),
-                            dcc.Dropdown(id="v6-kpi13-variable-filter", options=MARKET_VARIABLE_OPTIONS, value="BRAND", placeholder="Select variable", clearable=True),
+                            html.Div("Market Registration type", className="filter-label"),
+                            dcc.Dropdown(id="v6-kpi13-mkt-regtype-filter", options=[
+                                {"label": "Passenger Cars", "value": "Passenger Cars"},
+                                {"label": "Light Commercial Vehicle", "value": "Light Commercial Vehicle"},
+                                {"label": "Heavy Commercial Vehicle", "value": "Heavy Commercial Vehicle"}
+                            ], value=["Passenger Cars"], multi=True, placeholder="Select type", clearable=True),
                         ],
                         className="filter-box",
                     ),
+                            html.Div(
+                                [
+                                    html.Div("Portfolio vs Market Variable", className="filter-label"),
+                                    dcc.Dropdown(id="v6-kpi13-variable-filter", options=MARKET_VARIABLE_OPTIONS, value="BRAND", placeholder="Select variable", clearable=True),
+                                ],
+                                className="filter-box",
+                            ),
+                            html.Div(
+                                [
+                                    html.Div("Market owner type", className="filter-label"),
+                                    dcc.Dropdown(id="v6-kpi13-owner-filter", options=OWNER_TYPE_OPTIONS, value="ALL", placeholder="Select owner", clearable=False),
+                                ],
+                                className="filter-box",
+                            ),
                     html.Div(
                         [
                             html.Div("Period", className="filter-label"),
@@ -4380,30 +4418,36 @@ def update_view4_kpi10(_refresh_clicks: int, country: str, status: str, bike_or_
         Output("v5-status-filter-label", "children"),
         Output("v5-status-filter", "options"),
         Output("v5-status-filter", "value"),
+        Output("v5-variable-filter-label", "children"),
         Output("v5-variable-filter", "options"),
         Output("v5-variable-filter", "value"),
+        Output("v5-market-owner-container", "style"),
     ],
     Input("v5-source-filter", "value"),
 )
 def sync_v5_source_filters(source):
     if source == "market":
-        status_label = "Registration Type"
+        status_label = "Market Registration type"
         status_options = [
             {"label": "Passenger Cars", "value": "Passenger Cars"},
             {"label": "Light Commercial Vehicle", "value": "Light Commercial Vehicle"},
             {"label": "Heavy Commercial Vehicle", "value": "Heavy Commercial Vehicle"}
         ]
         status_value = "Passenger Cars"
+        var_label = "Market Variable"
         var_options = CONCENTRATION_VARIABLE_OPTIONS_MARKET
         var_value = var_options[0]["value"] if var_options else None
+        owner_style = {"display": "block"}
     else:
-        status_label = "Status"
+        status_label = "Portfolio Status type"
         status_options = [{"label": s, "value": s} for s in CONCENTRATION_STATUS_OPTIONS]
         status_value = "IN FLEET"
+        var_label = "Portfolio Variable"
         var_options = CONCENTRATION_VARIABLE_OPTIONS_PORTFOLIO
         var_value = var_options[0]["value"] if var_options else None
+        owner_style = {"display": "none"}
     
-    return status_label, status_options, status_value, var_options, var_value
+    return status_label, status_options, status_value, var_label, var_options, var_value, owner_style
 
 
 @app.callback(
@@ -4415,9 +4459,10 @@ def sync_v5_source_filters(source):
     State("v5-variable-filter", "value"),
     State("v5-top-n-filter", "value"),
     State("v5-period-filter", "value"),
+    State("v5-market-owner-filter", "value"),
     prevent_initial_call=True,
 )
-def update_view5_kpi11(_refresh_clicks: int, status_value: str, source_value: str, variable: str, top_n_val: str, period_mode: str):
+def update_view5_kpi11(_refresh_clicks: int, status_value: str, source_value: str, variable: str, top_n_val: str, period_mode: str, market_owner: str):
     if has_missing_filters(status_value, source_value, variable):
         empty_fig = go.Figure()
         empty_fig.update_layout(title="KPI 11 - Sélectionnez les filtres puis cliquez sur Reload")
@@ -4428,6 +4473,9 @@ def update_view5_kpi11(_refresh_clicks: int, status_value: str, source_value: st
     if source_value == "market":
         # Filter market data by Registration Type (selected via the repurposed status filter)
         m_filtered = market_df[market_df["Registration Type"] == status_value].copy()
+        if market_owner and market_owner != "ALL":
+            m_filtered = m_filtered[m_filtered["Ownertype"] == market_owner]
+        
         market_ready, market_var = prepare_market_concentration_source(m_filtered, variable)
         kpi11_table_long = kpi_count_share_quarterly_market(market_ready, market_var, top_n=top_n_val, period_mode=period_mode)
         fig = plot_kpi_share(kpi11_table_long, market_var, period_mode)
@@ -4503,14 +4551,16 @@ def update_v6_variable_options(source):
     Output("v6-kpi13-table-wrap", "children"),
     Input("view6-kpi13-refresh-button", "n_clicks"),
     State("v6-kpi13-status-filter", "value"),
-    State("v6-kpi13-regtype-filter", "value"),
+    State("v6-kpi13-port-regtype-filter", "value"),
+    State("v6-kpi13-mkt-regtype-filter", "value"),
     State("v6-kpi13-variable-filter", "value"),
     State("v6-kpi13-period-filter", "value"),
     State("v6-kpi13-top-n-filter", "value"),
+    State("v6-kpi13-owner-filter", "value"),
     prevent_initial_call=True,
 )
-def update_view6_kpi13(_refresh_clicks: int, status_value: str, reg_type: str, variable: str, period_mode: str, top_n: str):
-    if has_missing_filters(status_value, reg_type, variable):
+def update_view6_kpi13(_refresh_clicks: int, status_value: str, port_reg: list, mkt_reg: list, variable: str, period_mode: str, top_n: str, owner_type: str):
+    if has_missing_filters(status_value, port_reg, mkt_reg, variable):
         empty_fig = go.Figure()
         empty_fig.update_layout(title="KPI 13 - Sélectionnez les filtres puis cliquez sur Reload")
         return empty_fig, html.Div("Sélectionnez les filtres puis cliquez sur Reload.", className="small-note")
@@ -4520,21 +4570,28 @@ def update_view6_kpi13(_refresh_clicks: int, status_value: str, reg_type: str, v
         empty_fig.update_layout(title="KPI 13 - Market dataset not found")
         return empty_fig, html.Div("Market dataset is not available.", className="small-note")
 
-    if variable == "OEM":
-        var_portfolio, var_market, bev = "OEM_UPDATE", "Make Group", False
-    elif variable == "BEV":
-        var_portfolio, var_market, bev = "BRAND_UPDATE", "Make", True
-    else:
-        var_portfolio, var_market, bev = "BRAND_UPDATE", "Make", False
+    m_subset = market_df.copy()
+    if mkt_reg and mkt_reg != "ALL" and mkt_reg != ["ALL"]:
+        m_subset = m_subset[m_subset["Registration Type"].isin(mkt_reg)]
+    
+    if owner_type and owner_type != "ALL":
+        m_subset = m_subset[m_subset["Ownertype"] == owner_type]
+
+    # Use standardized prep functions from View 5 to ensure consistency (e.g. CO2 Bucket)
+    portfolio_ready, portfolio_var = prepare_portfolio_concentration_source(df, variable)
+    market_ready, market_var = prepare_market_concentration_source(m_subset, variable)
+    
+    bev_only = (variable == "HIGHEST_BEV")
 
     kpi13 = kpi_top_brand_vs_market(
-        df_portfolio=df,
-        df_market=market_df,
-        var_col_portfolio=var_portfolio,
-        var_col_market=var_market,
+        df_portfolio=portfolio_ready,
+        df_market=market_ready,
+        var_col_portfolio=portfolio_var,
+        var_col_market=market_var,
         asset_status=status_value,
-        reg_type=reg_type,
-        bev_only=bev,
+        reg_type_portfolio=port_reg,
+        reg_type_market=mkt_reg,
+        bev_only=bev_only,
         top_n=top_n,
         period_mode=period_mode
     )
