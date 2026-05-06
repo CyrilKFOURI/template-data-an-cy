@@ -1446,6 +1446,7 @@ def build_view2_download_report(
     asset_status,
     metric_mode,
     bike_or_car,
+    period_mode,
     v2_fig: dict,
     v2_table_data: list[dict],
     v2_table_cols: list[dict],
@@ -1456,6 +1457,7 @@ def build_view2_download_report(
         ("Status", asset_status),
         ("Metric", metric_mode),
         ("Vehicle type", bike_or_car),
+        ("Granularity", period_mode),
     ]
 
     v2_table_df = pd.DataFrame(v2_table_data, columns=[c["id"] for c in v2_table_cols])
@@ -1474,7 +1476,7 @@ def build_view2_download_report(
 
     title_mode_cap = "Share" if metric_mode == "share" else "Volume"
     main_title = f"Production by Fuel Type - {asset_status} - {title_mode_cap}"
-    subtitle = f"{country} | {year} | {bike_or_car}"
+    subtitle = f"{country} | {year} | {bike_or_car} | {period_mode.capitalize()}"
     summary_text = f"<p class=\"muted\">{html_escape(subtitle)}</p>"
 
     # Ensure figure title is clean for report
@@ -2864,6 +2866,7 @@ def view2_layout() -> html.Div:
                 className="panel",
             ),
             dcc.Download(id="view2-html-download"),
+            dcc.Store(id="v2-applied-filters"),
         ]
     )
 
@@ -3986,22 +3989,26 @@ def update_kpi_period_note(_refresh_clicks: int, year: int | str, month_value: i
 @app.callback(
     Output("view2-html-download", "data"),
     Input("view2-download-button", "n_clicks"),
-    State("v2-country-filter", "value"),
-    State("v2-year-filter", "value"),
-    State("v2-metric-mode-filter", "value"),
-    State("v2-bike-or-car-filter", "value"),
-    State("v2-date-mode-filter", "value"),
-    State("v2-period-filter", "value"),
+    State("v2-applied-filters", "data"),
     State("kpi-8-graph", "figure"),
     State("v2-kpi8-table", "data"),
     State("v2-kpi8-table", "columns"),
     prevent_initial_call=True,
 )
-def download_view2_html(_n_clicks, country, year, metric_mode, bike_or_car, v2_date_mode_filter, period_mode, v2_fig, v2_table_data, v2_table_cols):
-    asset_status = "IN FLEET"
+def download_view2_html(_n_clicks, applied_filters, v2_fig, v2_table_data, v2_table_cols):
+    if not applied_filters:
+        return no_update
+    
+    country = applied_filters.get("country")
+    year = applied_filters.get("year")
+    metric_mode = applied_filters.get("metric_mode")
+    bike_or_car = applied_filters.get("bike_or_car")
+    asset_status = applied_filters.get("asset_status", "IN FLEET")
+    period_mode = applied_filters.get("period_mode", "monthly")
+
     try:
         html_content = build_view2_download_report(
-            country, year, asset_status, metric_mode, bike_or_car,
+            country, year, asset_status, metric_mode, bike_or_car, period_mode,
             v2_fig or {},
             v2_table_data or [],
             v2_table_cols or []
@@ -4020,6 +4027,7 @@ def download_view2_html(_n_clicks, country, year, metric_mode, bike_or_car, v2_d
 @app.callback(
     Output("v2-kpi8-graph", "figure"),
     Output("v2-kpi8-table-wrap", "children"),
+    Output("v2-applied-filters", "data"),
     Input("view2-refresh-button", "n_clicks"),
     State("v2-country-filter", "value"),
     State("v2-year-filter", "value"),
@@ -4031,10 +4039,19 @@ def download_view2_html(_n_clicks, country, year, metric_mode, bike_or_car, v2_d
 )
 def update_view2_kpi8(_refresh_clicks: int, country: str, year: int | str, metric_mode: str, bike_or_car: str, v2_date_mode_filter: str, period_mode: str):
     asset_status = "IN FLEET"
+    filters = {
+        "country": country,
+        "year": year,
+        "metric_mode": metric_mode,
+        "bike_or_car": bike_or_car,
+        "v2_date_mode_filter": v2_date_mode_filter,
+        "period_mode": period_mode,
+        "asset_status": asset_status
+    }
     if has_missing_filters(country, year, asset_status, metric_mode, bike_or_car, v2_date_mode_filter, period_mode):
         empty_fig = go.Figure()
         empty_fig.update_layout(title="Select the filters then click Refresh")
-        return empty_fig, html.Div("Select the filters then click Refresh.", className="small-note")
+        return empty_fig, html.Div("Select the filters then click Refresh.", className="small-note"), filters
 
     table_kpi8, y_title, x_title, period_label = get_kpi8_cached(country, year, asset_status, metric_mode, bike_or_car, v2_date_mode_filter, period_mode)
     table_kpi8 = table_kpi8.copy()
@@ -4042,7 +4059,7 @@ def update_view2_kpi8(_refresh_clicks: int, country: str, year: int | str, metri
     if table_kpi8.empty:
         empty_fig = go.Figure()
         empty_fig.update_layout(title=f"KPI 8 - No data available ({country}, {year})")
-        return empty_fig, html.Div("No data available for the selected filters.", className="small-note")
+        return empty_fig, html.Div("No data available for the selected filters.", className="small-note"), filters
 
     title_mode = "share" if metric_mode == "share" else "volume"
     title = f"Fuel Type {title_mode} by {x_title.lower()}<br><sup>{period_label} | {country} | {bike_or_car}</sup>"
@@ -4078,7 +4095,7 @@ def update_view2_kpi8(_refresh_clicks: int, country: str, year: int | str, metri
     table = build_table(format_view2_table_for_display(table_kpi8), page_size=15, table_id="v2-kpi8-table")
     title_mode_cap = "Share" if metric_mode == "share" else "Volume"
     table_title = f"Production by Fuel Type Table - {asset_status} - {title_mode_cap} - {x_title}"
-    return fig, html.Div([html.H4(table_title, className="panel-title"), table])
+    return fig, html.Div([html.H4(table_title, className="panel-title"), table]), filters
 
 
 @app.callback(
