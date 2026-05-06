@@ -3931,8 +3931,19 @@ def download_view1_html(
     summary_data, kpi7_fig, kpi7_table_data, kpi7_table_cols
 ):
     def get_val(children):
-        try: return children[0]['props']['children']
-        except: return "N/A"
+        try:
+            if not children: return "N/A"
+            # children is expected to be a list containing the card body Div
+            # but sometimes Dash might return the component dict directly
+            body = children[0] if isinstance(children, list) else children
+            # The body has props['children'] = [value_div, subtitle_div]
+            content = body.get('props', {}).get('children', [])
+            if isinstance(content, list) and len(content) > 0:
+                val_div = content[0]
+                return val_div.get('props', {}).get('children', "N/A")
+            return "N/A"
+        except Exception:
+            return "N/A"
 
     try:
         html_content = build_view1_download_report(
