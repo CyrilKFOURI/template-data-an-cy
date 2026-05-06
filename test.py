@@ -119,21 +119,21 @@ def get_kpi_data(df: pd.DataFrame, col: str | None = None, extra_keys: list[str]
 
 
 FUEL_COLOR_SEQUENCE = [
-    "#310906", # Rich Mahogany
-    "#633533", # Bitter Chocolate
-    "#90605e", # Smoky Rose
-    "#e9b6b4", # Cotton Rose
-    "#f3efe0", # Old Lace
-    "#c1d3c8", # Ash Grey
-    "#8fb7b0", # Muted Teal
-    "#597380", # Blue Slate
-    "#3e5168", # Charcoal Blue
-    "#222e50", # Space Indigo
-    "#d6ccc2", # Sandstone
-    "#b07d62", # Terracotta
-    "#6b705c", # Dark Sage
-    "#a4ac86", # Moss Green
-    "#333d29", # Forest Deep
+    "#8b3a3a", # Toasty Red
+    "#a66d4a", # Burnt Orange
+    "#d4a373", # Golden Sand
+    "#9b9b7a", # Muted Olive
+    "#ccd5ae", # Dusty Moss
+    "#e9edc9", # Creamy Sage
+    "#7ea8be", # Soft Sky
+    "#6a8caf", # Slate Blue
+    "#8d99ae", # Cool Grey
+    "#b1a7a6", # Warm Pewter
+    "#d6ccc2", # Linen
+    "#f5ebe0", # Soft Bone
+    "#e3b5a4", # Muted Peach
+    "#a58d8d", # Mauve Earth
+    "#5c6b4a", # Forest Mist
 ]
 
 def fuel_label_priority(label: str) -> int:
