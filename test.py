@@ -119,15 +119,21 @@ def get_kpi_data(df: pd.DataFrame, col: str | None = None, extra_keys: list[str]
 
 
 FUEL_COLOR_SEQUENCE = [
-    "#2c3e50", # Diesel
-    "#e67e22", # Petrol
-    "#f1c40f", # HEV
-    "#2ecc71", # PHEV
-    "#16a085", # BEV
-    "#3498db", 
-    "#8e44ad", 
-    "#d35400", 
-    "#7f8c8d",
+    "#310906", # Rich Mahogany
+    "#633533", # Bitter Chocolate
+    "#90605e", # Smoky Rose
+    "#e9b6b4", # Cotton Rose
+    "#f3efe0", # Old Lace
+    "#c1d3c8", # Ash Grey
+    "#8fb7b0", # Muted Teal
+    "#597380", # Blue Slate
+    "#3e5168", # Charcoal Blue
+    "#222e50", # Space Indigo
+    "#d6ccc2", # Sandstone
+    "#b07d62", # Terracotta
+    "#6b705c", # Dark Sage
+    "#a4ac86", # Moss Green
+    "#333d29", # Forest Deep
 ]
 
 def fuel_label_priority(label: str) -> int:
@@ -3990,7 +3996,7 @@ def update_kpi_period_note(_refresh_clicks: int, year: int | str, month_value: i
     Output("view2-html-download", "data"),
     Input("view2-download-button", "n_clicks"),
     State("v2-applied-filters", "data"),
-    State("kpi-8-graph", "figure"),
+    State("v2-kpi8-graph", "figure"),
     State("v2-kpi8-table", "data"),
     State("v2-kpi8-table", "columns"),
     prevent_initial_call=True,
