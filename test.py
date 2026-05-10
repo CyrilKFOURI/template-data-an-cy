@@ -1,115 +1,131 @@
 """
-Offline Pre-computation Engine
-================================
-Run this script once (or per country) to generate all Parquet result files.
-Then run fast_dashboard_reader.py to display results instantly.
+fix_bike_or_car.py
+==================
+Repair precomputed parquets dynamically:
+
+  1. Remove rows for BIKE_OR_CAR values absent from the raw data
+     (e.g. the old hardcoded "BIKE" value).
+  2. Add rows for BIKE_OR_CAR values that DO exist in the raw data but
+     are missing from the parquets (e.g. "2 WHEELS", "3 WHEELS") —
+     all filter combinations (month × status × dmode …) are computed.
+  3. CAR and ALL rows are never touched.
+  4. Rebuilds merged parquets at the end.
 
 Usage:
-  python generate_all_precomputed.py                        # default: SPAIN only
-  python generate_all_precomputed.py --countries FRANCE GERMANY
-  python generate_all_precomputed.py --countries ALL        # all countries
-
-Memory strategy: one country loaded at a time, freed before the next.
-
-Output structure:
-  precomputed_fast/data/
-    view1/kpis/year=YYYY/country=XXX/kpis.parquet
-    view1/kpi7/year=YYYY/country=XXX/kpi7.parquet
-    view2/kpi8/year=YYYY/country=XXX/kpi8.parquet
+    python precomputed_fast/fix_bike_or_car.py
 """
 
-import os
-import sys
 import gc
 import itertools
-import time
-import argparse
-import pandas as pd
+import os
+import sys
 from pathlib import Path
 
-# ── Configuration ─────────────────────────────────────────────────────────────
-PARENT_DIR = Path(__file__).resolve().parent.parent   # …/Arval/New/
-DATA_FOLDER = PARENT_DIR / "data"
-BASE_OUT    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+import pandas as pd
 
-ALL_COUNTRIES = [
-    "BELGIUM", "FRANCE", "GERMANY", "ITALY",
-    "LUXEMBOURG", "NETHERLANDS", "SPAIN", "UNITED KINGDOM",
-]
-
-# Default country list — override with --countries CLI arg
-COUNTRIES_TO_RUN = ["SPAIN", "ITALY"]
+# ── Paths ─────────────────────────────────────────────────────────────────────
+PARENT_DIR  = Path(__file__).resolve().parent.parent   # …/Arval/New/
+DATA_FOLDER = PARENT_DIR / "data"                      # raw NOVA parquets
+BASE_OUT    = Path(__file__).resolve().parent / "data" # precomputed KPI parquets
 
 START_YYYYMM = "202301"
 END_YYYYMM   = "202602"
 
-CONFIG = {
-    "generate_kpis_1_to_6": True,
-    "generate_kpi7":        True,
-    "generate_kpi8":        True,
-    "USE_UNIQUE_KEY_LOGIC": True,
-    "UNIQUE_KEY_COLS":      ["ID_CONTRACT", "VEHICLE_ID", "ID_QUOTATION"],
-    "TEST_MODE":            False,
-    "TEST_YEARS":           [],
-    "TEST_PERIOD_MODES":    [],
-}
+ALL_COUNTRY_NAMES = [
+    "BELGIUM", "FRANCE", "GERMANY", "ITALY",
+    "LUXEMBOURG", "NETHERLANDS", "SPAIN", "UNITED KINGDOM",
+]
 
-# ── Import fmd (no data loaded yet) ───────────────────────────────────────────
 os.environ["FAST_READER_MODE"] = "1"
-sys.path.insert(0, str(PARENT_DIR))
+sys.path.insert(0, str(PARENT_DIR))                      # fmd
+sys.path.insert(0, str(Path(__file__).resolve().parent)) # merge_parquets
+
 import fleet_monitoring_dashboard_key_refactor as fmd
 
-fmd.USE_UNIQUE_KEY_LOGIC = CONFIG["USE_UNIQUE_KEY_LOGIC"]
-fmd.UNIQUE_KEY_COLS      = CONFIG["UNIQUE_KEY_COLS"]
+fmd.USE_UNIQUE_KEY_LOGIC = True
+fmd.UNIQUE_KEY_COLS      = ["ID_CONTRACT", "VEHICLE_ID", "ID_QUOTATION"]
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-def save_parquet(df: pd.DataFrame, path: str) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+def _save_parquet(df: pd.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     df.columns = df.columns.astype(str)
     df.to_parquet(path, index=False)
 
 
-def get_years(df: pd.DataFrame) -> list[int]:
-    if CONFIG["TEST_MODE"] and CONFIG["TEST_YEARS"]:
-        return CONFIG["TEST_YEARS"]
-    return sorted(int(x) for x in df["YEAR"].dropna().unique())
+def _code_to_name_map() -> dict[str, str]:
+    """Scan one raw file per country to build {country_code: country_name}."""
+    mapping: dict[str, str] = {}
+    for name in ALL_COUNTRY_NAMES:
+        files = sorted(DATA_FOLDER.glob(f"*{name}*.parquet"))
+        if not files:
+            continue
+        try:
+            code = str(pd.read_parquet(files[0], columns=["COUNTRY"])["COUNTRY"].iloc[0])
+            mapping[code] = name
+        except Exception:
+            pass
+    return mapping
 
 
-def get_period_modes() -> list[str]:
-    if CONFIG["TEST_MODE"] and CONFIG["TEST_PERIOD_MODES"]:
-        return CONFIG["TEST_PERIOD_MODES"]
-    return ["monthly", "quarterly", "yearly"]
+def _codes_in_parquets() -> set[str]:
+    """Return country codes found in partition folder names (country=XX)."""
+    codes: set[str] = set()
+    for d in BASE_OUT.rglob("country=*"):
+        if d.is_dir():
+            raw_code = d.name.removeprefix("country=").replace("_", " ")
+            codes.add(raw_code)
+    return codes
 
 
+def _year_from_path(path: Path) -> int | None:
+    for part in path.parts:
+        if part.startswith("year="):
+            try:
+                return int(part.removeprefix("year="))
+            except ValueError:
+                pass
+    return None
 
-# ── Per-country generators ────────────────────────────────────────────────────
 
-def _get_country_code(df: pd.DataFrame) -> str | None:
-    """Return the actual country code stored in the COUNTRY column (e.g. 'ES' for Spain)."""
-    codes = [str(x) for x in df["COUNTRY"].dropna().unique()]
-    return codes[0] if codes else None
+# ── Per-dataset fixers ────────────────────────────────────────────────────────
 
-
-def generate_kpis_for_country(df: pd.DataFrame) -> None:
-    country_code = _get_country_code(df)
-    if country_code is None:
+def _fix_kpis(path: Path, df_raw: pd.DataFrame, actual_bocs: list[str]) -> None:
+    """Remove wrong BOC rows, add missing BOC rows — KPI 1-6 partition."""
+    df = pd.read_parquet(path)
+    if "BIKE_OR_CAR" not in df.columns or df.empty:
         return
 
-    years        = get_years(df)
-    months       = ["ALL", 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-    actual_bocs  = sorted(df["BIKE_OR_CAR"].dropna().astype(str).unique().tolist())
-    bocs         = ["ALL"] + actual_bocs
-    statuses     = ["IN FLEET", "ORDER", "DEHIRE", "ALL"]
-    dmodes       = ["NONE", "CONTRACT_START_DATE", "DELIVERY_DATE"]
+    # Step 1 – remove wrong values
+    valid   = set(actual_bocs) | {"ALL"}
+    bad     = ~df["BIKE_OR_CAR"].astype(str).isin(valid)
+    n_del   = int(bad.sum())
+    df      = df[~bad].reset_index(drop=True)
 
-    for year in years:
-        print(f"  KPI1-6 | {country_code} {year} computing...")
-        df_year = df[df["YEAR"] == year].copy()
-        records = []
-        combos  = list(itertools.product(months, bocs, statuses, dmodes))
+    # Step 2 – detect which non-CAR bocs are missing
+    present = set(df["BIKE_OR_CAR"].astype(str).unique())
+    to_add  = [b for b in actual_bocs if b != "CAR" and b not in present]
 
-        for month, boc, status, dmode in combos:
+    if not to_add and n_del == 0:
+        print(f"    [skip]  {path.parent.name}/{path.name}")
+        return
+
+    year = _year_from_path(path)
+    if year is None:
+        _save_parquet(df, path)
+        return
+
+    country_code = str(df["COUNTRY"].iloc[0])
+    df_year      = df_raw[df_raw["YEAR"] == year].copy()
+
+    months   = ["ALL", 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    statuses = ["IN FLEET", "ORDER", "DEHIRE", "ALL"]
+    dmodes   = ["NONE", "CONTRACT_START_DATE", "DELIVERY_DATE"]
+    records: list[dict] = []
+
+    for boc in to_add:
+        for month, status, dmode in itertools.product(months, statuses, dmodes):
             resolved   = fmd.resolve_month_value(country_code, year, month)
             kpi1       = fmd.kpi_lease_under_25(df_year, country_code, year, resolved, boc, dmode, status)
             kpi2       = fmd.kpi_lease_25_30(df_year, country_code, year, resolved, boc, dmode, status)
@@ -118,7 +134,6 @@ def generate_kpis_for_country(df: pd.DataFrame) -> None:
             ev         = fmd.kpi_ev_share(df_year, country_code, year, resolved, boc, dmode, status)
             pv_lcv     = fmd.kpi_pv_lcv(df_year, country_code, year, resolved, boc, dmode, status)  # type: ignore[arg-type]
             volume     = fmd.kpi_selected_volume(df_year, country_code, year, resolved, status, boc, dmode)
-
             records.append({
                 "COUNTRY":      country_code,
                 "YEAR":         int(year),
@@ -137,37 +152,48 @@ def generate_kpis_for_country(df: pd.DataFrame) -> None:
                 "VOLUME":       volume,
             })
 
-        result_df    = pd.DataFrame(records)
-        safe_country = country_code.replace(" ", "_")
-        path = os.path.join(
-            BASE_OUT, "view1", "kpis",
-            f"year={year}", f"country={safe_country}", "kpis.parquet"
-        )
-        save_parquet(result_df, path)
-        print(f"  KPI1-6 | {country_code} {year}: {len(result_df):,} records")
+    if records:
+        df = pd.concat([df, pd.DataFrame(records)], ignore_index=True)
+
+    _save_parquet(df, path)
+    print(f"    [fixed] {path.parent.name}/{path.name}  -={n_del} +={len(records)} rows  bocs={to_add}")
 
 
-def generate_kpi7_for_country(df: pd.DataFrame) -> None:
-    country_code = _get_country_code(df)
-    if country_code is None:
+def _fix_kpi7(path: Path, df_raw: pd.DataFrame, actual_bocs: list[str]) -> None:
+    """Remove wrong BOC rows, add missing BOC rows — KPI 7 partition."""
+    df = pd.read_parquet(path)
+    if "BIKE_OR_CAR" not in df.columns or df.empty:
         return
 
-    years        = get_years(df)
+    valid   = set(actual_bocs) | {"ALL"}
+    bad     = ~df["BIKE_OR_CAR"].astype(str).isin(valid)
+    n_del   = int(bad.sum())
+    df      = df[~bad].reset_index(drop=True)
+
+    present = set(df["BIKE_OR_CAR"].astype(str).unique())
+    to_add  = [b for b in actual_bocs if b != "CAR" and b not in present]
+
+    if not to_add and n_del == 0:
+        print(f"    [skip]  {path.parent.name}/{path.name}")
+        return
+
+    year = _year_from_path(path)
+    if year is None:
+        _save_parquet(df, path)
+        return
+
+    country_code = str(df["COUNTRY"].iloc[0])
+    df_year      = df_raw[df_raw["YEAR"] == year].copy()
+    start_date   = f"{year}-01-01"
+    end_date     = f"{year}-12-31"
+
     statuses     = ["IN FLEET", "ORDER", "DEHIRE", "ALL"]
     metric_modes = ["share", "volume"]
-    period_modes = get_period_modes()
-    actual_bocs  = sorted(df["BIKE_OR_CAR"].dropna().astype(str).unique().tolist())
-    bocs         = ["ALL"] + actual_bocs
-    combos       = list(itertools.product(statuses, metric_modes, period_modes, bocs))
+    period_modes = ["monthly", "quarterly", "yearly"]
+    new_frames: list[pd.DataFrame] = []
 
-    for year in years:
-        print(f"  KPI7   | {country_code} {year} computing...")
-        df_year    = df[df["YEAR"] == year].copy()
-        start_date = f"{year}-01-01"
-        end_date   = f"{year}-12-31"
-        all_results = []
-
-        for status, mm, pm, boc in combos:
+    for boc in to_add:
+        for status, mm, pm in itertools.product(statuses, metric_modes, period_modes):
             res_df, _, _, _ = fmd.kpi7_fuel_by_period(
                 df_year, country_code, status, mm, pm,
                 bike_or_car=boc, date_mode="COB_DATE",
@@ -175,51 +201,60 @@ def generate_kpi7_for_country(df: pd.DataFrame) -> None:
             )
             if res_df is None or res_df.empty:
                 continue
-
             res_df = res_df.copy()
             res_df.index.name = "FUEL_TYPE"
             if "FUEL_TYPE" not in res_df.columns:
                 res_df = res_df.reset_index()
-
             res_df["COUNTRY"]      = country_code
             res_df["YEAR"]         = int(year)
             res_df["ASSET_STATUS"] = status
             res_df["METRIC_MODE"]  = mm
             res_df["PERIOD_MODE"]  = pm
             res_df["BIKE_OR_CAR"]  = boc
-            all_results.append(res_df)
+            new_frames.append(res_df)
 
-        if all_results:
-            combined     = pd.concat(all_results, ignore_index=True)
-            safe_country = country_code.replace(" ", "_")
-            path = os.path.join(
-                BASE_OUT, "view1", "kpi7",
-                f"year={year}", f"country={safe_country}", "kpi7.parquet"
-            )
-            save_parquet(combined, path)
-            print(f"  KPI7   | {country_code} {year}: {len(combined):,} rows")
+    if new_frames:
+        df = pd.concat([df] + new_frames, ignore_index=True)
+
+    _save_parquet(df, path)
+    added = sum(len(f) for f in new_frames)
+    print(f"    [fixed] {path.parent.name}/{path.name}  -={n_del} +={added} rows  bocs={to_add}")
 
 
-def generate_kpi8_for_country(df: pd.DataFrame) -> None:
-    country_code = _get_country_code(df)
-    if country_code is None:
+def _fix_kpi8(path: Path, df_raw: pd.DataFrame, actual_bocs: list[str]) -> None:
+    """Remove wrong BOC rows, add missing BOC rows — KPI 8 partition."""
+    df = pd.read_parquet(path)
+    if "BIKE_OR_CAR" not in df.columns or df.empty:
         return
 
-    years        = get_years(df)
+    valid   = set(actual_bocs) | {"ALL"}
+    bad     = ~df["BIKE_OR_CAR"].astype(str).isin(valid)
+    n_del   = int(bad.sum())
+    df      = df[~bad].reset_index(drop=True)
+
+    present = set(df["BIKE_OR_CAR"].astype(str).unique())
+    to_add  = [b for b in actual_bocs if b != "CAR" and b not in present]
+
+    if not to_add and n_del == 0:
+        print(f"    [skip]  {path.parent.name}/{path.name}")
+        return
+
+    year = _year_from_path(path)
+    if year is None:
+        _save_parquet(df, path)
+        return
+
+    country_code = str(df["COUNTRY"].iloc[0])
+    df_year      = df_raw[df_raw["YEAR"] == year].copy()
+
     statuses     = ["IN FLEET", "ORDER", "DEHIRE", "ALL"]
     metric_modes = ["share", "volume"]
-    actual_bocs  = sorted(df["BIKE_OR_CAR"].dropna().astype(str).unique().tolist())
-    bocs         = ["ALL"] + actual_bocs
     dmodes       = ["NONE", "CONTRACT_START_DATE", "DELIVERY_DATE"]
-    period_modes = get_period_modes()
-    combos       = list(itertools.product(statuses, metric_modes, bocs, dmodes, period_modes))
+    period_modes = ["monthly", "quarterly", "yearly"]
+    new_frames: list[pd.DataFrame] = []
 
-    for year in years:
-        print(f"  KPI8   | {country_code} {year} computing...")
-        df_year     = df[df["YEAR"] == year].copy()
-        all_results = []
-
-        for status, mm, boc, dmode, pm in combos:
+    for boc in to_add:
+        for status, mm, dmode, pm in itertools.product(statuses, metric_modes, dmodes, period_modes):
             res_df, _, _, _ = fmd.kpi8_production_ytd(
                 df_year, country_code, year,
                 asset_status=status, metric_mode=mm,
@@ -227,7 +262,6 @@ def generate_kpi8_for_country(df: pd.DataFrame) -> None:
             )
             if res_df is None or res_df.empty:
                 continue
-
             res_df = res_df.copy()
             res_df["COUNTRY"]      = country_code
             res_df["YEAR"]         = int(year)
@@ -236,63 +270,71 @@ def generate_kpi8_for_country(df: pd.DataFrame) -> None:
             res_df["BIKE_OR_CAR"]  = boc
             res_df["DATE_MODE"]    = dmode
             res_df["PERIOD_MODE"]  = pm
-            all_results.append(res_df)
+            new_frames.append(res_df)
 
-        if all_results:
-            combined     = pd.concat(all_results, ignore_index=True)
-            safe_country = country_code.replace(" ", "_")
-            path = os.path.join(
-                BASE_OUT, "view2", "kpi8",
-                f"year={year}", f"country={safe_country}", "kpi8.parquet"
-            )
-            save_parquet(combined, path)
-            print(f"  KPI8   | {country_code} {year}: {len(combined):,} rows")
+    if new_frames:
+        df = pd.concat([df] + new_frames, ignore_index=True)
+
+    _save_parquet(df, path)
+    added = sum(len(f) for f in new_frames)
+    print(f"    [fixed] {path.parent.name}/{path.name}  -={n_del} +={added} rows  bocs={to_add}")
 
 
-# ── Main loop: one country at a time ──────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────────────────
 
-def run(countries: list[str]) -> None:
-    total_start = time.time()
-    for country in countries:
-        print(f"\n=== {country} ===")
-        t0   = time.time()
-        _raw = fmd.load_country_monthly_data(
+def run() -> None:
+    code_to_name    = _code_to_name_map()
+    codes_present   = _codes_in_parquets()
+
+    if not codes_present:
+        print("No partition parquets found under", BASE_OUT)
+        return
+
+    for code in sorted(codes_present):
+        country_name = code_to_name.get(code)
+        if not country_name:
+            print(f"\n[warn] No raw files found for code '{code}' — skipping.")
+            continue
+
+        print(f"\n=== {country_name} ({code}) ===")
+
+        _raw   = fmd.load_country_monthly_data(
             folder_path=DATA_FOLDER,
-            countries=[country],
+            countries=[country_name],
             start_yyyymm=START_YYYYMM,
             end_yyyymm=END_YYYYMM,
             cols=fmd.COLUMNS_TO_READ,
         )
-        df = fmd.prepare_data_set(_raw)
+        df_raw = fmd.prepare_data_set(_raw)
         del _raw
-        print(f"  Loaded {len(df):,} rows in {time.time()-t0:.1f}s")
 
-        if CONFIG["generate_kpis_1_to_6"]:
-            generate_kpis_for_country(df)
-        if CONFIG["generate_kpi7"]:
-            generate_kpi7_for_country(df)
-        if CONFIG["generate_kpi8"]:
-            generate_kpi8_for_country(df)
+        actual_bocs = sorted(df_raw["BIKE_OR_CAR"].dropna().astype(str).unique().tolist())
+        to_fix      = [b for b in actual_bocs if b != "CAR"]
+        print(f"  Raw BIKE_OR_CAR values : {actual_bocs}")
+        print(f"  Will add/verify        : {to_fix}")
 
-        del df
+        safe = code.replace(" ", "_")
+
+        print("  KPI 1-6:")
+        for p in sorted((BASE_OUT / "view1" / "kpis").rglob(f"country={safe}/kpis.parquet")):
+            _fix_kpis(p, df_raw, actual_bocs)
+
+        print("  KPI 7:")
+        for p in sorted((BASE_OUT / "view1" / "kpi7").rglob(f"country={safe}/kpi7.parquet")):
+            _fix_kpi7(p, df_raw, actual_bocs)
+
+        print("  KPI 8:")
+        for p in sorted((BASE_OUT / "view2" / "kpi8").rglob(f"country={safe}/kpi8.parquet")):
+            _fix_kpi8(p, df_raw, actual_bocs)
+
+        del df_raw
         gc.collect()
-        print(f"  Done in {time.time()-t0:.1f}s")
 
-    print(f"\nAll done in {time.time()-total_start:.1f}s -> run merge_parquets.py")
+    # Rebuild merged parquets
+    print("\nRebuilding merged parquets...")
+    from merge_parquets import merge_all
+    merge_all()
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Arval Fleet - Offline Pre-computation Engine")
-    parser.add_argument(
-        "--countries", nargs="+", metavar="COUNTRY",
-        help="Countries to generate. Use ALL for every country.",
-    )
-    args = parser.parse_args()
-
-    if args.countries:
-        COUNTRIES_TO_RUN = ALL_COUNTRIES if args.countries == ["ALL"] else args.countries
-    else:
-        COUNTRIES_TO_RUN = COUNTRIES_TO_RUN   # default from top of file
-
-    run(COUNTRIES_TO_RUN)
+    run()
