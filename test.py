@@ -10,8 +10,6 @@ fig = px.scatter(
 )
 
 fig.update_layout(
-    xaxis_title="Brand",
-    yaxis_title="Model"
+    xaxis_tickangle=-45,
+    height=800
 )
-
-fig.show()
