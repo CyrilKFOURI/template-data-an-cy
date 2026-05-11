@@ -1,45 +1,19 @@
-import ipywidgets as widgets
-from IPython.display import display
+import numpy as np
 
-def brand_model_widget(df, brand_col, model_col):
+# init colonne
+spain_202512["MODEL_2"] = np.nan
 
-    # Dropdown des brands
-    brand_dropdown = widgets.Dropdown(
-        options=sorted(df[brand_col].dropna().unique()),
-        description="Brand:",
-        layout=widgets.Layout(width="300px")
-    )
+for brand in a["BRAND"].dropna().unique():
 
-    output = widgets.Output()
+    # subset brand
+    nova_brand = spain_202512[spain_202512["BRAND"] == brand]
+    a_brand = a[a["BRAND"] == brand]
 
-    # Fonction d'affichage
-    def show_models(change):
+    for model_a in a_brand["MODEL"].dropna().unique():
 
-        output.clear_output()
-
-        selected_brand = change["new"]
-
-        models = (
-            df[df[brand_col] == selected_brand][model_col]
-            .dropna()
-            .astype(str)
-            .unique()
+        mask = (
+            (spain_202512["BRAND"] == brand) &
+            (spain_202512["MODEL"].str.contains(model_a, na=False))
         )
 
-        with output:
-            print(f"Brand: {selected_brand}")
-            print(f"Number of models: {len(models)}\n")
-
-            for model in sorted(models):
-                print(f"- {model}")
-
-    # event listener
-    brand_dropdown.observe(show_models, names="value")
-
-    # init display
-    show_models({"new": brand_dropdown.value})
-
-    display(brand_dropdown, output)
-
-
-brand_model_widget(df, "BRAND", "MODEL")
+        spain_202512.loc[mask, "MODEL_2"] = model_a
