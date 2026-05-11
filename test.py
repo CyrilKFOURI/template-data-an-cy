@@ -2,21 +2,27 @@ import numpy as np
 
 spain_202512_models["MODEL_2"] = np.nan
 
+# force proprement les types une seule fois (IMPORTANT)
+spain_202512_models["MODEL"] = spain_202512_models["MODEL"].fillna("").astype(str)
+a["MODEL"] = a["MODEL"].fillna("").astype(str)
+
 for brand in a["BRAND"].dropna().unique():
 
-    # dataset a
     a_brand = a[a["BRAND"] == brand]
+    nova_mask_brand = spain_202512_models["BRAND_UPDATE"] == brand
 
-    # dataset nova (spain)
-    nova_brand = spain_202512_models[
-        spain_202512_models["BRAND_UPDATE"] == brand
-    ]
+    for model_a in a_brand["MODEL"].unique():
 
-    for model_a in a_brand["MODEL"].dropna().astype(str).unique():
+        if model_a == "":
+            continue
 
         mask = (
-            (spain_202512_models["BRAND_UPDATE"] == brand) &
-            (spain_202512_models["MODEL"].astype(str).str.contains(model_a, na=False))
+            nova_mask_brand &
+            spain_202512_models["MODEL"].str.contains(
+                model_a,
+                na=False,
+                regex=False   # 🔥 IMPORTANT (évite bugs regex + accélère)
+            )
         )
 
         spain_202512_models.loc[mask, "MODEL_2"] = model_a
