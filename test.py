@@ -57,3 +57,15 @@ def match_models_between_dfs(
             df1.loc[mask, output_col] = model
 
     return df1
+
+
+
+spain_202512_models = match_models_between_dfs(
+    df1=spain_202512_models,
+    df2=a,
+    brand_col_df1="BRAND_UPDATE",
+    model_col_df1="MODEL",
+    brand_col_df2="BRAND",
+    model_col_df2="MODEL",
+    output_col="MODEL_2"
+)
