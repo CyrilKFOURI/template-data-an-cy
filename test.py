@@ -1,1 +1,0 @@
-nova_models["MODEL_3"] = nova_models["MODEL_2"].fillna(nova_models["MODEL"])
