@@ -12,3 +12,16 @@ df_clean = df_clean.explode("model")
 df_clean["model"] = df_clean["model"].str.strip()
 
 df_clean = df_clean.drop(columns=["models"]).rename(columns={"categories": "brand"})
+
+
+
+
+
+mapping = {
+    "mercedes": "mercedes benz",
+    "mercedes-benz": "mercedes benz",
+    "bmw ": "bmw",
+    "vw": "volkswagen"
+}
+
+df["brand"] = df["brand"].str.lower().str.strip().replace(mapping)
