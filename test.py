@@ -1,61 +1,81 @@
 import pandas as pd
 
-# =========================
-# 1. SAFETY COPY
-# =========================
-nova = nova.copy()
+print("===== 1. CHECK SHAPE =====")
+print("nova:", nova.shape)
+print("remarketing:", remarketing_classification_p.shape)
+
 
 # =========================
-# 2. CLEAN RIGHT TABLE (NO COLLISIONS EVER)
+# 2. CHECK DUPLICATES (CRUCIAL)
 # =========================
-right = (
-    remarketing_classification_p[
-        ["BRAND", "MODEL_NOVA", "CDN_CLF_SEGMENT"]
-    ]
-    .drop_duplicates()
-    .rename(columns={
-        "BRAND": "BRAND_RIGHT",
-        "MODEL_NOVA": "MODEL_RIGHT"
-    })
+print("\n===== 2. DUPLICATES CHECK =====")
+
+dup_right = remarketing_classification_p.duplicated(
+    subset=["BRAND", "MODEL_NOVA"]
+).sum()
+
+print("Duplicates (BRAND, MODEL_NOVA) in remarketing:", dup_right)
+
+
+# =========================
+# 3. CLEAN RIGHT TABLE (SAFE MERGE)
+# =========================
+remarketing_clean = remarketing_classification_p.drop_duplicates(
+    subset=["BRAND", "MODEL_NOVA"]
 )
 
-# =========================
-# 3. ENSURE TYPE CONSISTENCY
-# =========================
-nova["BRAND_UPDATE"] = nova["BRAND_UPDATE"].astype(str)
-nova["MARKET_MODEL"] = nova["MARKET_MODEL"].astype(str)
+print("Right table after dedup:", remarketing_clean.shape)
 
-right["BRAND_RIGHT"] = right["BRAND_RIGHT"].astype(str)
-right["MODEL_RIGHT"] = right["MODEL_RIGHT"].astype(str)
 
 # =========================
-# 4. MERGE (SAFE + LEFT JOIN)
+# 4. CHECK KEY OVERLAP
 # =========================
+print("\n===== 3. KEY OVERLAP CHECK =====")
+
+nova_keys = set(zip(nova["BRAND_UPDATE"], nova["MARKET_MODEL"]))
+right_keys = set(zip(remarketing_clean["BRAND"], remarketing_clean["MODEL_NOVA"]))
+
+print("Unique nova keys:", len(nova_keys))
+print("Unique right keys:", len(right_keys))
+print("Intersection:", len(nova_keys & right_keys))
+
+
+# =========================
+# 5. TEST INNER JOIN RATE
+# =========================
+print("\n===== 4. INNER JOIN TEST =====")
+
+test_join = nova.merge(
+    remarketing_clean,
+    how="inner",
+    left_on=["BRAND_UPDATE", "MARKET_MODEL"],
+    right_on=["BRAND", "MODEL_NOVA"]
+)
+
+print("Inner join rows:", len(test_join))
+print("Match rate:", len(test_join) / len(nova))
+
+
+# =========================
+# 6. REAL MERGE (SAFE)
+# =========================
+print("\n===== 5. FINAL MERGE =====")
+
 nova = nova.merge(
-    right,
+    remarketing_clean[["BRAND", "MODEL_NOVA", "CDN_CLF_SEGMENT"]],
     how="left",
     left_on=["BRAND_UPDATE", "MARKET_MODEL"],
-    right_on=["BRAND_RIGHT", "MODEL_RIGHT"]
+    right_on=["BRAND", "MODEL_NOVA"]
 )
 
-# =========================
-# 5. CLEAN UP (KEEP NOVA CLEAN)
-# =========================
-nova.drop(
-    columns=["BRAND_RIGHT", "MODEL_RIGHT"],
-    inplace=True
-)
+nova.drop(columns=["BRAND", "MODEL_NOVA"], inplace=True)
+
 
 # =========================
-# 6. FINAL COLUMN CLEANUP
+# 7. FINAL CHECKS
 # =========================
-nova.rename(
-    columns={"CDN_CLF_SEGMENT": "CDN_CLF_SEGMENT"},
-    inplace=True
-)
+print("\n===== 6. FINAL CHECK =====")
 
-# =========================
-# 7. OPTIONAL CHECKS
-# =========================
-print("Rows:", len(nova))
-print("Missing segment:", nova["CDN_CLF_SEGMENT"].isna().sum())
+print("Final rows:", len(nova))
+print("CDN NULL %:", nova["CDN_CLF_SEGMENT"].isna().mean())
+print("CDN filled:", nova["CDN_CLF_SEGMENT"].notna().sum())
