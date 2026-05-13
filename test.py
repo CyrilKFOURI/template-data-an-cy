@@ -1,56 +1,64 @@
 import pandas as pd
+import plotly.express as px
 
 # =========================
-# 0. COPY SAFE
+# 1. AGRÉGATION
 # =========================
-nova = nova.copy()
-nova_models = nova_models.copy()
-market_models = market_models.copy()
-
-# =========================
-# 1. NETTOYER DOUBLONS CLÉS (CRITIQUE)
-# =========================
-nova_models = nova_models.drop_duplicates(
-    subset=["BRAND_UPDATE", "MODEL"]
+grouped = (
+    nova
+    .groupby(["BRAND_UPDATE", "BODY_GROUP"])
+    .size()
+    .reset_index(name="count")
 )
 
-market_models = market_models.drop_duplicates(
-    subset=["Make", "Sub Model Short"]
+# total par marque
+totals = (
+    nova
+    .groupby("BRAND_UPDATE")
+    .size()
+    .reset_index(name="total")
 )
 
+# merge
+df = grouped.merge(totals, on="BRAND_UPDATE")
+
+# % calcul
+df["pct"] = df["count"] / df["total"] * 100
+
+
 # =========================
-# 2. STEP 1 : MODEL MATCH
+# 2. PLOTLY (STACKED BAR %)
 # =========================
-nova = nova.merge(
-    nova_models[["BRAND_UPDATE", "MODEL", "MODEL_2"]],
-    how="left",
-    on=["BRAND_UPDATE", "MODEL"]
+fig = px.bar(
+    df,
+    x="BRAND_UPDATE",
+    y="pct",
+    color="BODY_GROUP",
+    title="BODY GROUP distribution per brand (%)",
+    labels={"pct": "% share", "BRAND_UPDATE": "Brand"},
 )
 
-nova["MARKET_MODEL"] = nova["MODEL_2"]
-nova.drop(columns=["MODEL_2"], inplace=True)
-
-# =========================
-# 3. STEP 2 : BODY GROUP MATCH
-# =========================
-nova = nova.merge(
-    market_models[["Make", "Sub Model Short", "Body Group"]],
-    how="left",
-    left_on=["BRAND_UPDATE", "MARKET_MODEL"],
-    right_on=["Make", "Sub Model Short"],
-    how="left"
+fig.update_layout(
+    barmode="stack",
+    xaxis_tickangle=-45,
+    yaxis_title="% within brand"
 )
 
-nova.drop(columns=["Make", "Sub Model Short"], inplace=True)
+fig.show()
+
 
 # =========================
-# 4. (OPTIONNEL) CLEAN FINAL
+# 3. (OPTIONNEL) TABLE SUV ONLY
 # =========================
-nova.rename(columns={"Body Group": "BODY_GROUP"}, inplace=True)
+suv = df[df["BODY_GROUP"] == "SUV"].sort_values("pct", ascending=False)
 
-# =========================
-# 5. CHECKS (IMPORTANT)
-# =========================
-print("Rows final:", len(nova))
-print("Missing MARKET_MODEL:", nova["MARKET_MODEL"].isna().sum())
-print("Missing BODY_GROUP:", nova["BODY_GROUP"].isna().sum())
+fig2 = px.bar(
+    suv,
+    x="BRAND_UPDATE",
+    y="pct",
+    title="SUV share per brand (%)",
+    labels={"pct": "SUV %", "BRAND_UPDATE": "Brand"}
+)
+
+fig2.update_layout(xaxis_tickangle=-45)
+fig2.show()
