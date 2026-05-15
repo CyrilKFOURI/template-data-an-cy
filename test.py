@@ -6,10 +6,10 @@ def kp19_1_type_share_quarter(df, year, vehicle_type, country, asset_status, bik
     key_cols = ["ID_QUOTATION", "ID_CONTRACT", "VEHICLE_ID"]
     df = df.drop_duplicates(subset=key_cols)
 
-    grouped = df.groupby(["POWER_CATEGORY", "Quarter"]).size().reset_index(name="COUNT")
+    grouped = df.groupby("Quarter")["VEHICLE_ID"].nunique().reset_index(name="COUNT")
 
-    pivot = grouped.pivot(index="POWER_CATEGORY", columns="Quarter", values="COUNT").fillna(0)
+    total = grouped["COUNT"].sum()
 
-    share = pivot.div(pivot.sum(axis=0), axis=1) * 100
+    grouped["SHARE"] = (grouped["COUNT"] / total) * 100
 
-    return share.round(2)
+    return grouped[["Quarter", "SHARE"]].round(2)
