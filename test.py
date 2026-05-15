@@ -15,23 +15,41 @@ def kp19_2_power_category_per_type_quarter(
         & (df["COUNTRY"] == country)
     ].copy()
 
+    # Date
+    df["COB_DATE"] = pd.to_datetime(df["COB_DATE"])
+
     # Quarter
     df["Quarter"] = (
-        ((df["MONTH"] - 1) // 3) + 1
+        ((df["COB_DATE"].dt.month - 1) // 3) + 1
     ).apply(lambda x: f"Q{x}")
 
-    # Drop duplicates sur la clé
+    # Clé unique
     key_cols = [
         "ID_QUOTATION",
         "ID_CONTRACT",
         "VEHICLE_ID"
     ]
 
-    df = df.drop_duplicates(subset=key_cols)
+    # Une seule ligne par clé et COB_DATE
+    df = df.drop_duplicates(
+        subset=key_cols + ["COB_DATE"]
+    )
 
-    # Groupby
+    # Dernier snapshot du quarter
+    latest_cob_per_quarter = (
+        df.groupby("Quarter")["COB_DATE"]
+        .max()
+        .reset_index()
+    )
+
+    df = df.merge(
+        latest_cob_per_quarter,
+        on=["Quarter", "COB_DATE"]
+    )
+
+    # Comptage
     grouped = (
-        df.groupby(["POWER_CATEGORY", "Quarter"])
+        df.groupby(["Quarter", "POWER_CATEGORY"])
         .size()
         .reset_index(name="COUNT")
     )
