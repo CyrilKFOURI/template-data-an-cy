@@ -1,64 +1,30 @@
-def kp19_2_power_category_per_type_quarter(
-    df,
-    year,
-    vehicle_type,
-    country,
-    asset_status,
-    bike_or_car='CAR'
-):
+def kp19_1_type_share_quarter(df, year, vehicle_type, country, asset_status, bike_or_car='CAR'):
+    df = df[(df["YEAR"] == year) & (df["NOVA_ASSET_STATUS"] == asset_status) & (df["MARKET_BODY_GROUP"] == vehicle_type) & (df["COUNTRY"] == country)].copy()
 
-    # Filtre
-    df = df[
-        (df["YEAR"] == year)
-        & (df["NOVA_ASSET_STATUS"] == asset_status)
-        & (df["MARKET_BODY_GROUP"] == vehicle_type)
-        & (df["COUNTRY"] == country)
-    ].copy()
+    df["Quarter"] = ((df["MONTH"] - 1) // 3 + 1).apply(lambda x: f"Q{x}")
 
-    # Date
-    df["COB_DATE"] = pd.to_datetime(df["COB_DATE"])
+    key_cols = ["ID_QUOTATION", "ID_CONTRACT", "VEHICLE_ID"]
+    df = df.drop_duplicates(subset=key_cols)
 
-    # Quarter
-    df["Quarter"] = (
-        ((df["COB_DATE"].dt.month - 1) // 3) + 1
-    ).apply(lambda x: f"Q{x}")
+    grouped = df.groupby(["NOVA_ASSET_STATUS", "Quarter"]).size().reset_index(name="COUNT")
 
-    # Clé unique
-    key_cols = [
-        "ID_QUOTATION",
-        "ID_CONTRACT",
-        "VEHICLE_ID"
-    ]
+    pivot = grouped.pivot(index="NOVA_ASSET_STATUS", columns="Quarter", values="COUNT").fillna(0)
 
-    # Une seule ligne par clé et COB_DATE
-    df = df.drop_duplicates(
-        subset=key_cols + ["COB_DATE"]
-    )
+    share = pivot.div(pivot.sum(axis=0), axis=1) * 100
 
-    # Dernier snapshot du quarter
-    latest_cob_per_quarter = (
-        df.groupby("Quarter")["COB_DATE"]
-        .max()
-        .reset_index()
-    )
+    return share.round(2)
 
-    df = df.merge(
-        latest_cob_per_quarter,
-        on=["Quarter", "COB_DATE"]
-    )
 
-    # Comptage
-    grouped = (
-        df.groupby(["Quarter", "POWER_CATEGORY"])
-        .size()
-        .reset_index(name="COUNT")
-    )
+def kp19_2_power_category_per_type_quarter(df, year, vehicle_type, country, asset_status, bike_or_car='CAR'):
+    df = df[(df["YEAR"] == year) & (df["NOVA_ASSET_STATUS"] == asset_status) & (df["MARKET_BODY_GROUP"] == vehicle_type) & (df["COUNTRY"] == country)].copy()
 
-    # Pivot
-    pivot = grouped.pivot(
-        index="Quarter",
-        columns="POWER_CATEGORY",
-        values="COUNT"
-    ).fillna(0)
+    df["Quarter"] = ((df["MONTH"] - 1) // 3 + 1).apply(lambda x: f"Q{x}")
+
+    key_cols = ["ID_QUOTATION", "ID_CONTRACT", "VEHICLE_ID"]
+    df = df.drop_duplicates(subset=key_cols)
+
+    grouped = df.groupby(["POWER_CATEGORY", "Quarter"]).size().reset_index(name="COUNT")
+
+    pivot = grouped.pivot(index="Quarter", columns="POWER_CATEGORY", values="COUNT").fillna(0)
 
     return pivot
