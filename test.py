@@ -1,14 +1,45 @@
-def kp19_1_type_share_quarter(df, year, vehicle_type, country, asset_status, bike_or_car='CAR'):
-    df = df[(df["YEAR"] == year) & (df["NOVA_ASSET_STATUS"] == asset_status) & (df["COUNTRY"] == country)].copy()
+def kpi10_volume_per_model_quarter_EOC(
+    df,
+    NOVA_ASSET_STATUS,
+    start_year,
+    end_year,
+    country,
+    bike_or_car="CAR"
+):
+    df = df[
+        (df["NOVA_ASSET_STATUS"] == NOVA_ASSET_STATUS)
+        & (df["COUNTRY"] == country)
+    ].copy()
 
     key_cols = ["ID_QUOTATION", "ID_CONTRACT", "VEHICLE_ID"]
     df = df.drop_duplicates(subset=key_cols)
 
-    df["Quarter"] = ((df["MONTH"] - 1) // 3 + 1).apply(lambda x: f"Q{x}")
+    df = df.dropna(subset=["CONTRACT_FINAL_END"])
+    df["CONTRACT_FINAL_END"] = pd.to_datetime(df["CONTRACT_FINAL_END"])
 
-    total = df.groupby("Quarter")["VEHICLE_ID"].count()
-    type_count = df[df["MARKET_BODY_GROUP"] == vehicle_type].groupby("Quarter")["VEHICLE_ID"].count()
+    df = df[
+        (df["CONTRACT_FINAL_END"].dt.year >= start_year)
+        & (df["CONTRACT_FINAL_END"].dt.year <= end_year)
+    ]
 
-    pct = (type_count / total * 100).fillna(0).round(2)
+    df["Quarter"] = df["CONTRACT_FINAL_END"].dt.to_period("Q")
 
-    return pct.reset_index(name="PCT")
+    pivot = df.pivot_table(
+        index="Quarter",
+        columns="VEHICLE_MODEL_MAPED",
+        values="VEHICLE_ID",
+        aggfunc="nunique",
+        fill_value=0
+    )
+
+    total_row = pd.DataFrame(pivot.sum()).T
+    total_row.index = ["Total"]
+
+    pivot = pd.concat([pivot, total_row])
+
+    col_order = pivot.loc["Total"].sort_values(ascending=False).index
+    pivot = pivot[col_order]
+
+    pivot = pivot.reset_index()
+
+    return pivot
