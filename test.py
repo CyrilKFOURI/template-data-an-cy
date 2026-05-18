@@ -1,5 +1,5 @@
 import pandas as pd
-import numpy as np
+from sklearn.impute import SimpleImputer
 from dtreeviz.trees import dtreeviz
 
 model = xgboost_simple_model.model
@@ -11,16 +11,15 @@ X_train_df = pd.DataFrame(
     columns=[f"f{i}" for i in range(X_train.shape[1])]
 )
 
-df = X_train_df.copy()
-df["target"] = y_train
+imputer = SimpleImputer(strategy="median")
+X_train_clean = imputer.fit_transform(X_train_df)
 
-df = df.dropna()
+X_train_clean = pd.DataFrame(
+    X_train_clean,
+    columns=X_train_df.columns
+)
 
-if len(df) == 0:
-    raise ValueError("Dataset vide après dropna → trop de NaN dans X_train/y_train")
-
-X_train_clean = df.drop(columns=["target"]).reset_index(drop=True)
-y_train_clean = df["target"].reset_index(drop=True)
+y_train_clean = pd.Series(y_train)
 
 model.get_booster().feature_names = X_train_clean.columns.tolist()
 
