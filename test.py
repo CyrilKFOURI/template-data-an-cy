@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 from dtreeviz.trees import dtreeviz
 
 model = xgboost_simple_model.model
@@ -13,10 +14,13 @@ X_train_df = pd.DataFrame(
 df = X_train_df.copy()
 df["target"] = y_train
 
-df = df.dropna().reset_index(drop=True)
+df = df.dropna()
 
-X_train_clean = df.drop(columns=["target"])
-y_train_clean = df["target"]
+if len(df) == 0:
+    raise ValueError("Dataset vide après dropna → trop de NaN dans X_train/y_train")
+
+X_train_clean = df.drop(columns=["target"]).reset_index(drop=True)
+y_train_clean = df["target"].reset_index(drop=True)
 
 model.get_booster().feature_names = X_train_clean.columns.tolist()
 
