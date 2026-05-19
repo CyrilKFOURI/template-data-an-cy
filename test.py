@@ -1,110 +1,93 @@
-def build_kpi6_table(df, metric='SHARE'):
-    
-    # copie
-    temp = df.copy()
+Le dataset utilisé pour ce KPI contient déjà plusieurs colonnes de filtres préparées en amont afin de faciliter la création dynamique du dashboard et des tables.
 
-    # créer le nom des futures colonnes
-    temp['COL_NAME'] = (
-        temp['YEAR'].astype(str)
-        + '_'
-        + temp['PERIOD'].astype(str)
-        + '_'
-        + metric.upper()
-    )
+Colonnes principales disponibles dans l’output :
 
-    # pivot pour les valeurs SHARE ou VOLUME
-    pivot_metric = temp.pivot_table(
-        index='COUNTRY',
-        columns='COL_NAME',
-        values=metric.upper(),
-        aggfunc='first'
-    ).reset_index()
+COUNTRY
 
-    # pivot pour la variable (marque/oem/etc)
-    pivot_var = temp.pivot_table(
-        index='COUNTRY',
-        columns='COL_NAME',
-        values='BRAND_UPDATE',
-        aggfunc='first'
-    ).reset_index()
+BRAND_UPDATE
 
-    # rename colonnes variable
-    pivot_var.columns = [
-        col.replace(metric.upper(), 'VAR')
-        if col != 'COUNTRY' else col
-        for col in pivot_var.columns
-    ]
+YEAR
 
-    # merge des deux
-    final = pivot_metric.merge(
-        pivot_var,
-        on='COUNTRY',
-        how='left'
-    )
+PERIOD
 
-    return final
+VOLUME
 
-kpi11 = get_kpi5(
-    view5,
-    'portfolio',
-    'IN FLEET',
-    'ES',
-    SOURCE_FILTER[0],
-    'quarterly',
-    top_n='1'
-)
+TOTAL
 
-tableau = build_kpi6_table(kpi11, metric='SHARE')
+SHARE
 
-tableau
+SOURCE_FILTER
+
+COUNTRY_FILTER
+
+STATUS_FILTER
+
+VARIABLE_FILTER
+
+TOP_N_FILTER
+
+PERIOD_MODE_FILTER
+
+OEM_UPDATE
+
+CO2_BUCKET
+
+BEV
+
+VOLUME_YTD
+
+TOTAL_YTD
+
+SHARE_YTD
+
+Make
+
+REG_TYPE_FILTER
+
+OWNER_FILTER
+
+Make Group
 
 
+Le premier filtre du dashboard sera le filtre SOURCE, avec deux choix possibles :
+
+Portfolio
+
+Market
 
 
+En fonction de la valeur sélectionnée dans ce filtre, les autres filtres affichés dans l’interface changeront dynamiquement.
 
-def build_kpi6_table(df, variable, metric='SHARE'):
-    
-    temp = df.copy()
+Si l’utilisateur sélectionne Portfolio, les filtres affichés seront :
 
-    temp['COL_NAME'] = (
-        temp['YEAR'].astype(str)
-        + '_'
-        + temp['PERIOD'].astype(str)
-        + '_'
-        + metric.upper()
-    )
+PORTFOLIO STATUS
 
-    pivot_metric = temp.pivot_table(
-        index='COUNTRY',
-        columns='COL_NAME',
-        values=metric.upper(),
-        aggfunc='first'
-    ).reset_index()
+PORTFOLIO VARIABLE
 
-    pivot_var = temp.pivot_table(
-        index='COUNTRY',
-        columns='COL_NAME',
-        values=variable,
-        aggfunc='first'
-    ).reset_index()
+PERIOD
 
-    pivot_var.columns = [
-        col.replace(metric.upper(), 'VAR')
-        if col != 'COUNTRY' else col
-        for col in pivot_var.columns
-    ]
-
-    final = pivot_metric.merge(
-        pivot_var,
-        on='COUNTRY',
-        how='left'
-    )
-
-    return final
+TOP N
 
 
-tableau = build_kpi6_table(
-    kpi11,
-    variable=SOURCE_FILTER[0],
-    metric='SHARE'
-)
+Si l’utilisateur sélectionne Market, les filtres affichés seront :
+
+MARKET REGISTRATION
+
+MARKET VARIABLE
+
+MARKET OWNER
+
+TOP N
+
+
+Les colonnes utilisées pour les filtres Market sont notamment :
+
+Make
+
+REG_TYPE_FILTER
+
+OWNER_FILTER
+
+
+Le filtre MARKET REGISTRATION devra permettre une sélection multiple.
+L’utilisateur pourra donc cocher plusieurs valeurs simultanément (par exemple deux types d’enregistrement différents) sans être limité à une seule sélection.
