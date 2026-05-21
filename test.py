@@ -85,3 +85,12 @@ nova_models = match_models_between_dfs(
 
     output_col="MARKET_MODEL"
 )
+
+
+compare_model_matching(
+    df=nova_models,
+    brand_col="BRAND_UPDATE",
+    original_model_col="MODEL",
+    matched_model_col="MARKET_MODEL",
+    score_col="MARKET_MODEL_SCORE"
+)
