@@ -2,12 +2,11 @@ import pandas as pd
 import re
 import unicodedata
 import ipywidgets as widgets
-
 from IPython.display import display, HTML
 
 
 # =========================================================
-# MATCHING FUNCTION
+# 1. MATCHING FUNCTION
 # =========================================================
 def match_models_between_dfs(
     df1,
@@ -21,14 +20,8 @@ def match_models_between_dfs(
 ):
 
     weak_tokens = {
-        "CLASS",
-        "SERIES",
-        "SERIE",
-        "MODEL",
-        "NEW",
-        "PHASE",
-        "TYPE",
-        "MY"
+        "CLASS", "SERIES", "SERIE", "MODEL",
+        "NEW", "PHASE", "TYPE", "MY"
     }
 
     strong_numeric_patterns = [
@@ -38,18 +31,13 @@ def match_models_between_dfs(
     ]
 
     def normalize_text(text):
-
         if pd.isna(text):
             return ""
 
         text = str(text).upper().strip()
 
         text = unicodedata.normalize("NFKD", text)
-
-        text = "".join(
-            c for c in text
-            if not unicodedata.combining(c)
-        )
+        text = "".join(c for c in text if not unicodedata.combining(c))
 
         text = (
             text.replace("-", " ")
@@ -58,7 +46,6 @@ def match_models_between_dfs(
         )
 
         text = re.sub(r"\s+", " ", text)
-
         text = re.sub(r"([A-Z]+)(\d)", r"\1 \2", text)
         text = re.sub(r"(\d)([A-Z]+)", r"\1 \2", text)
 
@@ -68,62 +55,38 @@ def match_models_between_dfs(
         return text.split()
 
     def is_strong_numeric(token):
-
         for pattern in strong_numeric_patterns:
-
             if re.fullmatch(pattern, token):
                 return True
-
         return False
 
     df1 = df1.copy()
     df2 = df2.copy()
 
-    # =========================================================
-    # CLEAN COLUMNS
-    # =========================================================
     df1["_BRAND_CLEAN"] = df1[brand_col_df1].apply(normalize_text)
     df1["_MODEL_CLEAN"] = df1[model_col_df1].apply(normalize_text)
 
     df2["_BRAND_CLEAN"] = df2[brand_col_df2].apply(normalize_text)
     df2["_MODEL_CLEAN"] = df2[model_col_df2].apply(normalize_text)
 
-    # =========================================================
-    # OUTPUT COLUMNS
-    # =========================================================
     df1[output_col] = None
     df1[f"{output_col}_SCORE"] = 0
 
-    # metadata columns
-    df1["MATCH_COUNTRY"] = None
-    df1["MATCH_CLASSIFICATION"] = None
-
-    # =========================================================
-    # MATCHING
-    # =========================================================
     for brand in df2["_BRAND_CLEAN"].unique():
 
         if brand == "":
             continue
 
-        df2_brand = df2[
-            df2["_BRAND_CLEAN"] == brand
-        ]
-
-        df1_brand_idx = df1[
-            df1["_BRAND_CLEAN"] == brand
-        ].index
+        df2_brand = df2[df2["_BRAND_CLEAN"] == brand]
+        df1_brand_idx = df1[df1["_BRAND_CLEAN"] == brand].index
 
         for idx in df1_brand_idx:
 
             model_1 = df1.at[idx, "_MODEL_CLEAN"]
-
             tokens_1 = tokenize(model_1)
 
             best_score = 0
             best_match = None
-            best_country = None
-            best_classification = None
 
             for _, row2 in df2_brand.iterrows():
 
@@ -136,7 +99,6 @@ def match_models_between_dfs(
 
                 score = 0
 
-                # exact match
                 if model_1 == model_2:
                     score += 100
 
@@ -148,7 +110,6 @@ def match_models_between_dfs(
                         score += 0
 
                     elif token.isdigit():
-
                         if is_strong_numeric(token):
                             score += 15
                         else:
@@ -160,70 +121,42 @@ def match_models_between_dfs(
                     else:
                         score += 10
 
-                # substring bonus
-                if (
-                    model_2 in model_1
-                    and len(model_2) > 2
-                ):
+                if model_2 in model_1 and len(model_2) > 2:
                     score += 20
 
-                # no overlap penalty
                 if len(common_tokens) == 0:
                     score -= 20
 
-                # keep best
                 if score > best_score:
-
                     best_score = score
-
                     best_match = row2[model_col_df2]
 
-                    # optional metadata
-                    if "COUNTRY" in row2.index:
-                        best_country = row2["COUNTRY"]
-
-                    if "CDN_CLF_SEGMENT" in row2.index:
-                        best_classification = row2["CDN_CLF_SEGMENT"]
-
-            # save best result
             if best_score >= threshold:
-
                 df1.at[idx, output_col] = best_match
-
                 df1.at[idx, f"{output_col}_SCORE"] = best_score
-
-                df1.at[idx, "MATCH_COUNTRY"] = best_country
-
-                df1.at[idx, "MATCH_CLASSIFICATION"] = best_classification
 
     return df1
 
 
 # =========================================================
-# MATCHING REVIEW UI
+# 2. UI COMPARISON FUNCTION
 # =========================================================
 def compare_model_matching(
     df,
     brand_col,
     original_model_col,
     matched_model_col,
-    score_col=None,
-    volume_col=None
+    score_col=None
 ):
 
     def norm(x):
-
         if pd.isna(x):
             return ""
 
         x = str(x).upper().strip()
 
         x = unicodedata.normalize("NFKD", x)
-
-        x = "".join(
-            c for c in x
-            if not unicodedata.combining(c)
-        )
+        x = "".join(c for c in x if not unicodedata.combining(c))
 
         x = x.replace("-", " ")
         x = x.replace("_", " ")
@@ -232,12 +165,7 @@ def compare_model_matching(
 
         return x.strip()
 
-    brands = sorted(
-        df[brand_col]
-        .dropna()
-        .astype(str)
-        .unique()
-    )
+    brands = sorted(df[brand_col].dropna().astype(str).unique())
 
     dropdown = widgets.Dropdown(
         options=brands,
@@ -250,12 +178,9 @@ def compare_model_matching(
     def update(change):
 
         output.clear_output()
-
         brand = change["new"]
 
-        sub = df[
-            df[brand_col] == brand
-        ].copy()
+        sub = df[df[brand_col] == brand].copy()
 
         rows_html = ""
 
@@ -265,28 +190,11 @@ def compare_model_matching(
         for _, row in sub.iterrows():
 
             model_1 = row[original_model_col]
-
             model_2 = row[matched_model_col]
 
-            score = ""
-
-            if score_col is not None:
-                score = row[score_col]
-
-            volume = ""
-
-            if volume_col is not None:
-                volume = row[volume_col]
-
-            country = row.get("MATCH_COUNTRY", "")
-
-            classification = row.get(
-                "MATCH_CLASSIFICATION",
-                ""
-            )
+            score = row[score_col] if score_col else ""
 
             model_1_clean = norm(model_1)
-
             model_2_clean = norm(model_2)
 
             is_match = (
@@ -312,9 +220,6 @@ def compare_model_matching(
                 <td>{model_1}</td>
                 <td>{model_2}</td>
                 <td>{score}</td>
-                <td>{country}</td>
-                <td>{classification}</td>
-                <td>{volume}</td>
             </tr>
             """
 
@@ -322,30 +227,17 @@ def compare_model_matching(
         <h2>{brand}</h2>
 
         <p>
-            ✅ Matched: {matched_count}
-            <br>
+            ✅ Matched: {matched_count}<br>
             ❌ Unmatched: {unmatched_count}
         </p>
 
-        <table
-            border="1"
-            style="
-                border-collapse:collapse;
-                width:100%;
-            "
-        >
-
+        <table border="1" style="border-collapse:collapse;width:100%;">
             <tr>
                 <th>{original_model_col}</th>
                 <th>{matched_model_col}</th>
                 <th>Score</th>
-                <th>Country</th>
-                <th>Classification</th>
-                <th>Vehicle Count</th>
             </tr>
-
             {rows_html}
-
         </table>
         """
 
@@ -353,65 +245,28 @@ def compare_model_matching(
             display(HTML(html))
 
     dropdown.observe(update, names="value")
-
     update({"new": dropdown.value})
 
     display(dropdown, output)
 
 
 # =========================================================
-# BUILD VEHICLE COUNTS FROM NOVA
-# =========================================================
-vehicle_counts = (
-    nova
-    .groupby(["BRAND_UPDATE", "MODEL"])
-    .size()
-    .reset_index(name="VEHICLE_COUNT")
-)
-
-# =========================================================
-# ADD COUNTS TO nova_models
-# =========================================================
-nova_models = nova_models.merge(
-    vehicle_counts,
-    how="left",
-    on=["BRAND_UPDATE", "MODEL"]
-)
-
-# =========================================================
-# RUN MATCHING
+# 3. RUN
 # =========================================================
 nova_models = match_models_between_dfs(
-
     df1=nova_models,
-
     df2=market_models,
-
     brand_col_df1="BRAND_UPDATE",
     model_col_df1="MODEL",
-
     brand_col_df2="Make",
     model_col_df2="Sub Model Short",
-
-    output_col="MODEL_2",
-
-    threshold=10
+    output_col="MODEL_2"
 )
 
-# =========================================================
-# REVIEW UI
-# =========================================================
 compare_model_matching(
-
     df=nova_models,
-
     brand_col="BRAND_UPDATE",
-
     original_model_col="MODEL",
-
     matched_model_col="MODEL_2",
-
-    score_col="MODEL_2_SCORE",
-
-    volume_col="VEHICLE_COUNT"
+    score_col="MODEL_2_SCORE"
 )
