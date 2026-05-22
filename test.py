@@ -2070,9 +2070,19 @@ def fast_update_view5_kpi11(_n, status, market_reg, source, variable, top_n, per
 
     var_col = _kpi11_var_col(source, variable)
 
-    # Normalise YTD columns so plot and table always see VOLUME / SHARE
-    if "VOLUME_YTD" in df11.columns:
+    # Separate YTD from normal without creating duplicate column names.
+    # In the parquet all rows coexist: non-YTD rows have VOLUME/TOTAL/SHARE filled
+    # and VOLUME_YTD/SHARE_YTD as NaN; YTD rows are the opposite.
+    has_ytd_data = (
+        "VOLUME_YTD" in df11.columns
+        and "VOLUME" in df11.columns
+        and df11["VOLUME"].isna().all()
+    )
+    if has_ytd_data:
+        df11 = df11.drop(columns=["VOLUME", "TOTAL", "SHARE"], errors="ignore")
         df11 = df11.rename(columns={"VOLUME_YTD": "VOLUME", "SHARE_YTD": "SHARE"})
+    else:
+        df11 = df11.drop(columns=["VOLUME_YTD", "SHARE_YTD"], errors="ignore")
 
     try:
         fig = fmd.plot_kpi_share(df11, var_col, period_mode or "monthly")
@@ -2080,8 +2090,8 @@ def fast_update_view5_kpi11(_n, status, market_reg, source, variable, top_n, per
         empty_fig.update_layout(title=f"KPI 11 – Erreur rendu: {str(_e)[:120]}")
         fig = empty_fig
 
-    # Table: drop TOTAL (internal) for clean display
-    table_df = df11.drop(columns=["TOTAL", "TOTAL_YTD"], errors="ignore")
+    keep_cols = ["COUNTRY", "YEAR", "PERIOD", var_col, "VOLUME", "TOTAL", "SHARE"]
+    table_df = df11[[c for c in keep_cols if c in df11.columns]]
     table = fmd.build_table(table_df, page_size=15, heatmap=True, table_id="v5-kpi11-table")
     return fig, html.Div([html.H4("KPI 11 – Concentration", className="panel-title"), table])
 
