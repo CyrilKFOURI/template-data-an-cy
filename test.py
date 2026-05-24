@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import calendar
@@ -2462,6 +2461,10 @@ default_end_date = max_cob_date.date().isoformat() if pd.notna(max_cob_date) els
 month_options = ["ALL"] + [f"{month:02d}" for month in range(1, 13)]
 country_options = countries + ["ALL"]
 year_options = [{"label": "ALL", "value": "ALL"}] + [{"label": str(y), "value": y} for y in years]
+_eoc_years = sorted(df["CONTRACT_FINAL_END"].dropna().dt.year.astype(int).unique().tolist()) if not df.empty and "CONTRACT_FINAL_END" in df.columns else list(range(2023, 2033))
+eoc_year_options = [{"label": str(y), "value": y} for y in _eoc_years]
+default_start_eoc_year = int(max_cob_date.year) if pd.notna(max_cob_date) else (_eoc_years[0] if _eoc_years else 2025)
+default_end_eoc_year = default_start_eoc_year + 3
 default_status_v2 = "IN FLEET" if "IN FLEET" in statuses else (statuses[0] if statuses else "ALL")
 default_vehicle_type = "SUV" if "SUV" in vehicle_types else (vehicle_types[0] if vehicle_types else "ALL")
 bike_or_car_options = ["ALL"] + sorted(df["BIKE_OR_CAR"].dropna().astype(str).str.upper().unique().tolist()) if "BIKE_OR_CAR" in df.columns else ["ALL"]
@@ -3060,7 +3063,6 @@ def view3_layout() -> html.Div:
             # Filters for KPI 9_1 (will appear directly above KPI 9_1 panel)
             html.Div(
                 [
-                    html.Div("Filters - KPI 9_1", className="filter-label"),
                     html.Div(
                         [
                             html.Div("Country", className="filter-label"),
@@ -3140,7 +3142,6 @@ def view3_layout() -> html.Div:
             # Filters for KPI 9_2 (appear directly above KPI 9_2 panel)
             html.Div(
                 [
-                    html.Div("Filters - KPI 9_2", className="filter-label"),
                     html.Div(
                         [
                             html.Div("Country", className="filter-label"),
@@ -3248,8 +3249,15 @@ def view4_layout() -> html.Div:
                     ),
                     html.Div(
                         [
-                            html.Div("Year", className="filter-label"),
-                            dcc.Dropdown(id="v4-year-filter", options=year_options, value=None, placeholder="Select year", clearable=True),
+                            html.Div("Start Year (EOC)", className="filter-label"),
+                            dcc.Dropdown(id="v4-start-year-filter", options=eoc_year_options, value=default_start_eoc_year, clearable=False),
+                        ],
+                        className="filter-box",
+                    ),
+                    html.Div(
+                        [
+                            html.Div("End Year (EOC)", className="filter-label"),
+                            dcc.Dropdown(id="v4-end-year-filter", options=eoc_year_options, value=default_end_eoc_year, clearable=False),
                         ],
                         className="filter-box",
                     ),
@@ -3257,22 +3265,6 @@ def view4_layout() -> html.Div:
                         [
                             html.Div("Asset Status", className="filter-label"),
                             dcc.Dropdown(id="v4-status-filter", options=asset_status_options, value="IN FLEET", clearable=False),
-                        ],
-                        className="filter-box",
-                    ),
-                    html.Div(
-                        [
-                            html.Div("EOC End Period", className="filter-label"),
-                            dcc.Dropdown(
-                                id="v4-period-filter",
-                                options=[
-                                    {"label": "Monthly", "value": "monthly"},
-                                    {"label": "Quarterly", "value": "quarterly"},
-                                    {"label": "Yearly", "value": "yearly"},
-                                ],
-                                value="quarterly",
-                                clearable=False,
-                            ),
                         ],
                         className="filter-box",
                     ),
@@ -3291,7 +3283,7 @@ def view4_layout() -> html.Div:
                         className="filter-box",
                     ),
                 ],
-                className="controls-inline",
+                className="filter-bar",
             ),
             html.Div(
                 [
@@ -3588,20 +3580,20 @@ def view6_layout() -> html.Div:
                         ],
                         className="filter-box",
                     ),
-                            html.Div(
-                                [
-                                    html.Div("Portfolio vs Market Variable", className="filter-label"),
-                                    dcc.Dropdown(id="v6-kpi13-variable-filter", options=MARKET_VARIABLE_OPTIONS, value="BRAND", placeholder="Select variable", clearable=True),
-                                ],
-                                className="filter-box",
-                            ),
-                            html.Div(
-                                [
-                                    html.Div("Market owner type", className="filter-label"),
-                                    dcc.Dropdown(id="v6-kpi13-owner-filter", options=OWNER_TYPE_OPTIONS, value="ALL", placeholder="Select owner", clearable=False),
-                                ],
-                                className="filter-box",
-                            ),
+                    html.Div(
+                        [
+                            html.Div("Portfolio vs Market Variable", className="filter-label"),
+                            dcc.Dropdown(id="v6-kpi13-variable-filter", options=MARKET_VARIABLE_OPTIONS, value="BRAND", placeholder="Select variable", clearable=True),
+                        ],
+                        className="filter-box",
+                    ),
+                    html.Div(
+                        [
+                            html.Div("Market owner type", className="filter-label"),
+                            dcc.Dropdown(id="v6-kpi13-owner-filter", options=OWNER_TYPE_OPTIONS, value="ALL", placeholder="Select owner", clearable=False),
+                        ],
+                        className="filter-box",
+                    ),
                     html.Div(
                         [
                             html.Div("Period", className="filter-label"),
@@ -4553,22 +4545,24 @@ def update_view3_kpi92(_refresh_clicks: int, country: str, year: int | str, stat
     Output("v4-kpi10-table-wrap", "children"),
     Input("view4-refresh-button", "n_clicks"),
     State("v4-country-filter", "value"),
-    State("v4-year-filter", "value"),
+    State("v4-start-year-filter", "value"),
+    State("v4-end-year-filter", "value"),
     State("v4-status-filter", "value"),
-    State("v4-period-filter", "value"),
     State("v4-bike-or-car-filter", "value"),
     prevent_initial_call=True,
 )
-def update_view4_kpi10(_refresh_clicks: int, country: str, year: int | str, status: str, period_mode: str, bike_or_car: str):
-    if has_missing_filters(country, year, status, period_mode, bike_or_car):
+def update_view4_kpi10(_refresh_clicks: int, country: str, start_year: int | str, end_year: int | str, status: str, bike_or_car: str):
+    if has_missing_filters(country, start_year, end_year, status, bike_or_car):
         empty_fig = go.Figure()
         empty_fig.update_layout(title="KPI 10 - Select filters then click Reload")
         return empty_fig, html.Div("Select the filters then click Reload.", className="small-note")
 
+    period_mode = "yearly"
     out = df.copy()
     out = out[out["COUNTRY"] == country].copy()
-    if year != "ALL":
-        out = out[pd.to_datetime(out["CONTRACT_FINAL_END"], errors="coerce").dt.year == int(year)]
+    out["CONTRACT_FINAL_END"] = pd.to_datetime(out["CONTRACT_FINAL_END"], errors="coerce")
+    eoc_year_series = out["CONTRACT_FINAL_END"].dt.year
+    out = out[eoc_year_series.between(int(start_year), int(end_year))]
     if bike_or_car != "ALL":
         if "BIKE_OR_CAR" in out.columns:
             out = out[out["BIKE_OR_CAR"].astype(str).str.upper() == bike_or_car.upper()]
@@ -4581,10 +4575,8 @@ def update_view4_kpi10(_refresh_clicks: int, country: str, year: int | str, stat
         return empty_fig, html.Div("MARKET_MODEL column is missing.", className="small-note")
 
     out = out.dropna(subset=["CONTRACT_FINAL_END", model_col])
-    out["CONTRACT_FINAL_END"] = pd.to_datetime(out["CONTRACT_FINAL_END"], errors="coerce")
-
     out = out.dropna(subset=["CONTRACT_FINAL_END"])
-    
+
     if out.empty:
         empty_fig = go.Figure()
         empty_fig.update_layout(title="KPI 10 - No data")
@@ -4636,7 +4628,7 @@ def update_view4_kpi10(_refresh_clicks: int, country: str, year: int | str, stat
         )
 
         fig.update_layout(
-            title=f"KPI 10 - Top 10 models at EOC ({country}, {year}, {status}, {bike_or_car}, {period_label})",
+            title=f"KPI 10 - Top 10 models at EOC ({country}, {start_year}-{end_year}, {status}, {bike_or_car})",
             barmode="group",
             template="plotly_white",
             xaxis_title=str(x_title),
