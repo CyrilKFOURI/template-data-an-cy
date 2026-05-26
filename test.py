@@ -1,29 +1,29 @@
-Voici le système de scoring, de façon précise et compréhensible.
+Here is the scoring system, clearly described in English.
 
-- On commence le score à **0** pour chaque paire de modèles (un dans chaque table).
+- We start the **score at 0** for each pair of models (one from each table).
 
-- On ajoute **+100** si les deux modèles nettoyés sont **exactement identiques** (`model_1 == model_2`).
+- We add **+100** if the two cleaned model strings are **exactly identical** (`model_1 == model_2`).
 
-- On regarde les **mots (tokens) en commun** entre les deux modèles :
-  - Si le mot fait partie des mots “faibles” (`CLASS`, `SERIES`, `SERIE`, `MODEL`, `NEW`, `PHASE`, `TYPE`, `MY`), on **n’ajoute rien**.
-  - Sinon, si le mot est **uniquement composé de chiffres** :
-    - Si le nombre est **“fort”** (format type `Q5`, `X3`, ou un nombre de 3 ou 4 chiffres, par exemple `320`, `2008`), on ajoute **+15**.
-    - Sinon (nombre plus simple, par exemple `50`), on ajoute **+1**.
-  - Sinon, si le mot contient **à la fois des lettres et des chiffres** (ex. `A180`, `E200`), on ajoute **+15**.
-  - Sinon (mot purement alphabétique normal, ex. `CLIO`, `GOLF`), on ajoute **+10**.
+- Then we look at the **common tokens (words)** between the two cleaned models:
+  - If a token is in the list of **weak tokens** (`CLASS`, `SERIES`, `SERIE`, `MODEL`, `NEW`, `PHASE`, `TYPE`, `MY`), we **do not add anything** for that token.
+  - Otherwise, if the token is **only digits**:
+    - If it is considered a **strong numeric token** (matches patterns like `Q5`, `X3`, or a 3–4 digit number such as `320`, `2008`), we add **+15**.
+    - Otherwise (simpler numbers, e.g. `50`), we add **+1**.
+  - Otherwise, if the token contains **both letters and digits** (e.g. `A180`, `E200`), we add **+15**.
+  - Otherwise (a normal alphabetic word, e.g. `CLIO`, `GOLF`), we add **+10**.
 
-- Ensuite, on regarde si un modèle est **inclus** dans l’autre :
-  - Si le texte du modèle 2 (nettoyé) est **contenu** dans le texte du modèle 1 (nettoyé) et que ce texte fait **plus de 2 caractères**, on ajoute **+20**.
+- We also check for **substring inclusion**:
+  - If the cleaned text of model 2 is **contained inside** the cleaned text of model 1 and its length is **greater than 2**, we add **+20**.
 
-- Si les deux modèles **n’ont aucun mot en commun** (intersection de tokens vide), on **pénalise** en enlevant **20 points** (score −= 20).
+- If there are **no common tokens at all** between the two models, we **penalize** the pair by **subtracting 20 points** (score −= 20).
 
-- Pour chaque modèle du premier tableau, on garde le modèle du second tableau qui a le **score le plus élevé**.
-- Si ce meilleur score est **supérieur ou égal** au seuil (par défaut **10**), on le considère comme un match et on stocke :
-  - le modèle trouvé,
-  - le score.
-- Si le meilleur score est **en dessous de 10**, on considère qu’il **n’y a pas de match** fiable pour ce modèle.
+- For each model in the first table, we:
+  - compute this score against all candidate models of the same brand in the second table,
+  - keep the candidate with the **highest score** as the best match.
 
-Tu veux que je t’en fasse une version en une seule phrase math (type formule) pour mettre dans un doc technique ?
+- If this best score is **greater than or equal to the threshold** (default **10**), we accept it as a **match** and store:
+  - the matched model,
+  - the associated score.
+- If the best score is **below 10**, we consider that there is **no reliable match** for that model.
 
 Sources
-
