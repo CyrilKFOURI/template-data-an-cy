@@ -1,4 +1,38 @@
-Madame, Monsieur,
- Actuellement étudiant ingénieur en cinquième année à l’ECE Paris, en spécialisation Data Science, je souhaite intégrer un master de Mathématiques appliquées à la finance afin de consolider mes bases théoriques et d’approfondir mes compétences en analyse, algèbre et probabilités, dans la perspective d’une carrière orientée vers la recherche en finance quantitative. Les mathématiques sont pour moi bien plus qu’une discipline : elles constituent le centre de ma curiosité et de ma manière de penser. Ce Master représente, selon moi, l’un des programmes les plus exigeants et complets. Autodidacte et passionné par les mathématiques, j’ai appris par moi-même les fondements et extensions du calcul stochastique, des processus aléatoires et de la modélisation financière, ainsi que l’analyse de l’interprétabilité et de l’explicabilité de modèles de machine learning, de l’analyse d’images à l’analyse séquentielle de texte jusqu’à l’IA générative. Ces compétences m’ont permis de décrocher le stage de fin d’études que je réalise actuellement chez Arval BNP Paribas en tant que Risk Analyst – Data Scientist, où je participe à la conception et à la validation de modèles statistiques et de machine learning portant notamment sur la prévision, la détection d’anomalies, les simulations stochastiques et l’analyse de séries temporelles. Dans le cadre de mon projet de fin d’études réalisé avec EY, j’ai développé un logiciel de stratégie de couverture dynamique pour les banques et assurances. Ce projet m’a conduit à explorer en profondeur les modèles de pricing, leurs méthodes de résolution et d’approximation numérique, ainsi que la calibration via des algorithmes d’optimisation, jusqu’à la livraison d’une solution professionnelle complète. Très motivé, discipliné et animé par un fort sens de l’apprentissage, en autonomie comme dans le cadre de mon parcours universitaire, je suis convaincu de pouvoir être à la hauteur des exigences de ce Master. Veuillez recevoir, Madame, Monsieur, l’expression de mes salutations distinguées.
+import os
+import pandas as pd
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from sklearn.neighbors import NearestNeighbors
 
- Cyril Kfouri
+# --- CONFIGURATION SIMPLIFIÉE ---
+# Remplacez uniquement par votre adresse IP et port (ex: 10.0.0.1:8080)
+proxy_server = "votre-adresse-proxy:port" 
+
+os.environ['HTTP_PROXY'] = f"http://{proxy_server}"
+os.environ['HTTPS_PROXY'] = f"http://{proxy_server}"
+
+# --- CHARGEMENT DU MODÈLE ---
+model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2", device="cpu")
+
+# --- DÉFINITION DE LA FONCTION ---
+def match_models_between_dfs(df1, df2, brand_col_df1, model_col_df1, brand_col_df2, model_col_df2, output_col="MARKET_MODEL", threshold=0.75):
+    df1_c = df1.copy()
+    df2_c = df2.copy()
+
+    df1_c["_TEXT"] = df1_c[brand_col_df1].astype(str) + " " + df1_c[model_col_df1].astype(str)
+    df2_c["_TEXT"] = df2_c[brand_col_df2].astype(str) + " " + df2_c[model_col_df2].astype(str)
+    
+    emb_df2 = model.encode(df2_c["_TEXT"].tolist(), batch_size=256, normalize_embeddings=True, show_progress_bar=True)
+    emb_df1 = model.encode(df1_c["_TEXT"].tolist(), batch_size=256, normalize_embeddings=True, show_progress_bar=True)
+    
+    nn = NearestNeighbors(n_neighbors=1, metric="cosine")
+    nn.fit(emb_df2)
+    
+    dist, idx = nn.kneighbors(emb_df1)
+    
+    df1_c[output_col] = df2_c.iloc[idx.flatten()][model_col_df2].values
+    df1_c[f"{output_col}_SCORE"] = 1 - dist.flatten()
+    
+    return df1_c
+
+print("Configuration simplifiée appliquée.")
