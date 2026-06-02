@@ -1,29 +1,27 @@
 import os
 import glob
-import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
-def load_country_monthly_data(
+def load_country_monthly_data_pyarrow(
     folder_path,
     countries,
     start_yyyymm,
-    end_yyyymm,
-    cols=None
+    end_yyyymm
 ):
     files = glob.glob(f"{folder_path}/*.parquet")
 
     start_int = int(start_yyyymm)
     end_int = int(end_yyyymm)
+    countries = [c.upper().strip() for c in countries]
 
-    countries = [c.upper() for c in countries]
-
-    dfs_by_month = {}
+    by_month = {}
     file_prefix = None
 
     for f in files:
         filename = os.path.basename(f).replace(".parquet", "")
         parts = [p.strip() for p in filename.split("-")]
 
-        # attendu : NOVA - COUNTRY - YYYYMM
         if len(parts) < 3:
             continue
 
@@ -34,30 +32,23 @@ def load_country_monthly_data(
         if file_country in countries and start_int <= file_yyyymm <= end_int:
             if file_prefix is None:
                 file_prefix = current_prefix
-
-            df = pd.read_parquet(f, columns=cols)
-            dfs_by_month.setdefault(file_yyyymm, []).append(df)
+            by_month.setdefault(file_yyyymm, []).append(f)
 
     output_files = []
 
-    for month, dfs in sorted(dfs_by_month.items()):
-        full_df = pd.concat(dfs, ignore_index=True)
+    for month, month_files in sorted(by_month.items()):
         output_file = os.path.join(folder_path, f"{file_prefix} - G4 - {month}.parquet")
-        full_df.to_parquet(output_file, index=False)
-        output_files.append(output_file)
+
+        writer = None
+        for f in month_files:
+            table = pq.read_table(f)
+            if writer is None:
+                writer = pq.ParquetWriter(output_file, table.schema, compression="snappy")
+            writer.write_table(table)
+
+        if writer is not None:
+            writer.close()
+            print(f"Parquet créé : {output_file}")
+            output_files.append(output_file)
 
     return output_files
-    
-    
-    
-    
-G4 = ["FR", "DE", "IT", "ES"]
-
-files_created = load_country_monthly_data(
-    folder_path=data_path,
-    countries=G4,
-    start_yyyymm="202509",
-    end_yyyymm="202510",
-    cols=columns_to_read
-)
-
