@@ -47,3 +47,17 @@ def load_country_monthly_data(
         output_files.append(output_file)
 
     return output_files
+    
+    
+    
+    
+G4 = ["FR", "DE", "IT", "ES"]
+
+files_created = load_country_monthly_data(
+    folder_path=data_path,
+    countries=G4,
+    start_yyyymm="202509",
+    end_yyyymm="202510",
+    cols=columns_to_read
+)
+
