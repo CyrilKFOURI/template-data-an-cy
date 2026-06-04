@@ -5,17 +5,22 @@ folder = "ton_path"
 
 files = glob.glob(f"{folder}/*.parquet")
 
-print(f"{len(files)} fichiers trouvés")
+merged_files = [
+    f for f in files
+    if "-merged" in os.path.basename(f)
+]
 
-for f in files:
+print(f"Nombre de fichiers avec '-merged' : {len(merged_files)}")
+
+for f in merged_files:
     base = os.path.basename(f)
-    print(base)
+    new_base = base.replace("-merged", "")
 
-    if "-merged" in base:
-        new_base = base.replace("-merged", "")
-        print(f"RENAME: {base} -> {new_base}")
+    os.rename(
+        f,
+        os.path.join(folder, new_base)
+    )
 
-        os.rename(
-            f,
-            os.path.join(folder, new_base)
-        )
+    print(f"{base} -> {new_base}")
+
+print("Renommage terminé")
