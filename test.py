@@ -668,37 +668,35 @@ def generate_view4_for_country(df: pd.DataFrame) -> pd.DataFrame:
     else:
         return pd.DataFrame()
 
-    # EOC years from CONTRACT_FINAL_END (not from COB_DATE)
     eoc_year_series = pd.to_datetime(df["CONTRACT_FINAL_END"], errors="coerce").dt.year.dropna().astype(int)
-    # ── Filter out-of-range years (bad dates → e.g. 1970 or 2099 cause pair explosion) ──
-    # Fleet contracts typically span 3-5 years; allow ±8 years around today for edge cases.
-    # Reducing this window cuts year pairs quadratically (35y→630 pairs, 16y→120 pairs).
     _now_year = pd.Timestamp.now().year
     eoc_years_raw = sorted(eoc_year_series.unique().tolist())
     eoc_years = [y for y in eoc_years_raw if (_now_year - 8) <= y <= (_now_year + 8)]
     n_dropped = len(eoc_years_raw) - len(eoc_years)
     if not eoc_years:
-        print(f"    V4 {country_code}: no valid EOC years (all {len(eoc_years_raw)} raw years out of range) — skipping")
+        print(f"    V4 {country_code}: no valid EOC years — skipping")
         return pd.DataFrame()
 
-    bike_or_cars = ["ALL"] + sorted(df["BIKE_OR_CAR"].dropna().astype(str).str.upper().unique().tolist()) if "BIKE_OR_CAR" in df.columns else ["ALL"]
+    period_modes = get_period_modes()  # ["monthly", "quarterly", "yearly"]
+    bike_or_cars = (
+        ["ALL"] + sorted(df["BIKE_OR_CAR"].dropna().astype(str).str.upper().unique().tolist())
+        if "BIKE_OR_CAR" in df.columns else ["ALL"]
+    )
     statuses = [item["value"] for item in fmd.asset_status_options]
 
-    # ── Pre-filter country + parse datetime ONCE ──────────────────────────────
+    # Pre-filter country + parse datetime ONCE
     out_base = df[df["COUNTRY"] == country_code].copy()
     out_base["CONTRACT_FINAL_END"] = pd.to_datetime(out_base["CONTRACT_FINAL_END"], errors="coerce")
     out_base["_eoc_year"] = out_base["CONTRACT_FINAL_END"].dt.year
 
     print(f"    V4 {country_code}: {len(eoc_years)} EOC years [{eoc_years[0]}–{eoc_years[-1]}] "
-          f"× {len(statuses)} statuses × {len(bike_or_cars)} bocs"
+          f"× {len(period_modes)} modes × {len(statuses)} statuses × {len(bike_or_cars)} bocs"
           + (f" | {n_dropped} out-of-range years dropped" if n_dropped else ""))
 
     rows: list[pd.DataFrame] = []
     t_v4 = time.time()
 
-    # ── One pass per year (not per (start,end) pair) — reader does the pivot + Total ──
     for year in eoc_years:
-        t_year = time.time()
         out_year = out_base[out_base["_eoc_year"] == year]
         if out_year.empty or "MARKET_MODEL" not in out_year.columns:
             continue
@@ -712,25 +710,42 @@ def generate_view4_for_country(df: pd.DataFrame) -> pd.DataFrame:
         if "BIKE_OR_CAR" in work.columns:
             work["_boc_upper"] = work["BIKE_OR_CAR"].astype(str).str.upper()
 
-        for status in statuses:
+        _ends = work["CONTRACT_FINAL_END"]
+
+        for period_mode in period_modes:
+            # Compute PERIOD from CONTRACT_FINAL_END once per (year, period_mode)
+            if period_mode == "monthly":
+                work["PERIOD"] = _ends.dt.strftime("%Y-%m")
+            elif period_mode == "quarterly":
+                work["PERIOD"] = _ends.dt.to_period("Q").astype(str)
+            else:  # yearly
+                work["PERIOD"] = _ends.dt.year.astype("Int64").astype(str)
+
             for bike_or_car in bike_or_cars:
-                sub = work
+                sub_boc = work
                 if bike_or_car != "ALL" and "_boc_upper" in work.columns:
-                    sub = sub[sub["_boc_upper"] == bike_or_car]
-                sub = fmd.apply_status_filter(sub, status)
-                if sub.empty:
+                    sub_boc = sub_boc[sub_boc["_boc_upper"] == bike_or_car]
+                if sub_boc.empty:
                     continue
 
-                counts = sub.groupby("MARKET_MODEL")["_tmp_key"].nunique().reset_index(name="COUNT")
-                if counts.empty:
-                    continue
-                counts["YEAR_FILTER"]         = year
-                counts["COUNTRY_FILTER"]      = country_code
-                counts["ASSET_STATUS_FILTER"] = status
-                counts["BIKE_OR_CAR_FILTER"]  = bike_or_car
-                rows.append(counts)
+                for status in statuses:
+                    sub = fmd.apply_status_filter(sub_boc, status)
+                    if sub.empty:
+                        continue
 
-        print(f"    V4 {country_code} year={year}: {time.time()-t_year:.1f}s")
+                    counts = (
+                        sub.groupby(["PERIOD", "MARKET_MODEL"])["_tmp_key"]
+                        .nunique()
+                        .reset_index(name="COUNT")
+                    )
+                    if counts.empty:
+                        continue
+                    counts["EOC_YEAR"]            = year
+                    counts["PERIOD_MODE_FILTER"]  = period_mode
+                    counts["COUNTRY_FILTER"]      = country_code
+                    counts["ASSET_STATUS_FILTER"] = status
+                    counts["BIKE_OR_CAR_FILTER"]  = bike_or_car
+                    rows.append(counts)
 
     print(f"    V4 {country_code} TOTAL: {time.time()-t_v4:.1f}s | {len(rows)} result frames")
     return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
