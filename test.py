@@ -1,8 +1,6 @@
 nova['CLS_VEHICLE_TYPE_clean'] = (
-    pd.to_numeric(nova['CLS_VEHICLE_TYPE'], errors='coerce')  # convertit en numérique
-      .round()                                               # enlève les .0 résiduels
-      .astype('Int64')                                       # entier nullable pandas
-      .astype(str)                                           # optionnel si tu veux des labels propres
+    pd.to_numeric(nova['CLS_VEHICLE_TYPE'], errors='coerce')
+      .astype('Int64')
 )
 
 pct_by_country = (
