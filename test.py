@@ -1,15 +1,14 @@
-Bonjour Mouayed,
+nova['CLS_VEHICLE_TYPE_clean'] = (
+    pd.to_numeric(nova['CLS_VEHICLE_TYPE'], errors='coerce')  # convertit en numérique
+      .round()                                               # enlève les .0 résiduels
+      .astype('Int64')                                       # entier nullable pandas
+      .astype(str)                                           # optionnel si tu veux des labels propres
+)
 
-Je te contacte pour te demander quelque chose concernant les types de véhicules.
-
-Nous n’avons actuellement pas la règle permettant de savoir comment les pays classifient les véhicules, notamment pour déterminer si un modèle doit être considéré comme PV (Passenger Vehicle) ou LCV (Light Commercial Vehicle).
-
-Je voulais savoir si tu pouvais te rapprocher des équipes concernées afin de comprendre quels critères ou quelles règles sont utilisés dans les différents pays pour effectuer cette classification.
-
-En pièce jointe, j’ai fourni un fichier Excel présentant la répartition en pourcentage de la classification que nous avons actuellement pour l’ensemble des pays sur la période allant de janvier 2025 à juin 2025.
-
-Merci d’avance pour ton aide et ton retour.
-
-Bien à toi,
-
-Cyril
+pct_by_country = (
+    pd.crosstab(
+        nova['COUNTRY'],
+        nova['CLS_VEHICLE_TYPE_clean'],
+        normalize='index'
+    ) * 100
+).round(1)
