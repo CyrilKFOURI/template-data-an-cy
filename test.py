@@ -1,6 +1,8 @@
 nova['CLS_VEHICLE_TYPE_clean'] = (
-    pd.to_numeric(nova['CLS_VEHICLE_TYPE'], errors='coerce')
-      .astype('Int64')
+    nova['CLS_VEHICLE_TYPE']
+      .astype(str)
+      .str.strip()
+      .replace(r'^(\d+)\.0$', r'\1', regex=True)
 )
 
 pct_by_country = (
