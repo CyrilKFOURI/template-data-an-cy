@@ -1,1 +1,1 @@
-communs = set(view5['COUNTRY'].unique()).intersection(set(b['COUNTRY'].unique()))
+df.loc[df['COUNTRY'] == 'GB', 'COUNTRY'] = 'UK'
