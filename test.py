@@ -1,14 +1,13 @@
 import pandas as pd
 import plotly.express as px
 
-tmp = pd.json_normalize(df["data"].explode())
+tmp = pd.DataFrame(wltp["data_json"].iloc[0])
 
 fig = px.line(
-    tmp.sort_values("QTR"),
+    tmp,
     x="QTR",
     y="WLTP_Q_MEAN_VEH_NEW",
-    markers=True,
-    title="Evolution de WLTP_Q_MEAN_VEH_NEW"
+    markers=True
 )
 
 fig.show()
