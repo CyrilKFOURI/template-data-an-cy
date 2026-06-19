@@ -22,9 +22,10 @@ def get_grouped_data(df, y_col, x_cols, metric='volume'):
     df_grouped['x_combined'] = df_grouped[x_cols].astype(str).agg(' - '.join, axis=1)
     return df_grouped.pivot_table(index=y_col, columns='x_combined', values='count', aggfunc='sum', fill_value=0)
 
-def plot_heatmap(df_pivot, title):
+def plot_heatmap(df_pivot, title, metric='volume'):
+    fmt_val = "d" if metric == 'volume' else ".0f"
     plt.figure(figsize=(16, 10))
-    sns.heatmap(df_pivot, annot=True, fmt="d", cmap="YlGnBu")
+    sns.heatmap(df_pivot, annot=True, fmt=fmt_val, cmap="YlGnBu")
     plt.title(title)
     plt.show()
 
@@ -37,7 +38,7 @@ def interactive_heatmap(df):
     
     def update(y_val, x_val, metric_val):
         data = get_grouped_data(df, y_val, list(x_val), metric=metric_val)
-        plot_heatmap(data, f'{y_val} vs {list(x_val)} ({metric_val})')
+        plot_heatmap(data, f'{y_val} vs {list(x_val)} ({metric_val})', metric=metric_val)
     
     interact(update, 
              y_val=widgets.Dropdown(options=y_options, description='Axe Y:'), 
