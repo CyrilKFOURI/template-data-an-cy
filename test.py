@@ -12,13 +12,16 @@ def format_number(val):
     return f'{int(val)}'
 
 def get_grouped_data(df, y_col, x_cols, metric='volume'):
-    # Clé unique globale comprenant tout ce que tu as spécifié
-    unique_keys = ['OBLIGOR_IDENTIFIER', 'ID_CONTRACT', 'VEHICLE_ID', 'ID_QUOTATION']
+    rating_cols = ['CLS_GROUP_RATING', 'COUNTERPARTY_RATING', 'GROUP_RATING']
+    is_rating = any(col in x_cols for col in rating_cols)
     
-    # On dédoublonne sur l'ensemble des colonnes d'analyse + les clés uniques
+    if is_rating:
+        unique_keys = ['OBLIGOR_IDENTIFIER', 'ID_CONTRACT', 'VEHICLE_ID', 'ID_QUOTATION']
+    else:
+        unique_keys = ['ID_CONTRACT', 'VEHICLE_ID', 'ID_QUOTATION']
+    
     df_clean = df.drop_duplicates(subset=unique_keys + [y_col] + x_cols)
     
-    # Calcul basé sur le mode choisi
     if metric == 'concentration_financiere':
         df_grouped = df_clean.groupby([y_col] + x_cols)['EXPOSURE_AMOUNT_TOT'].sum().reset_index(name='count')
     elif metric == 'intensite_risk_asset':
@@ -32,14 +35,8 @@ def get_grouped_data(df, y_col, x_cols, metric='volume'):
 def plot_heatmap(df_pivot, title, metric='volume', page=0):
     rows_per_page = 30
     total_rows = len(df_pivot)
+    df_subset = df_pivot.iloc[page*rows_per_page : (page+1)*rows_per_page]
     
-    if total_rows > rows_per_page:
-        start_row = page * rows_per_page
-        end_row = min(start_row + rows_per_page, total_rows)
-        df_subset = df_pivot.iloc[start_row:end_row]
-    else:
-        df_subset = df_pivot
-
     height = max(8, len(df_subset) * 0.4)
     plt.figure(figsize=(20, height))
     
