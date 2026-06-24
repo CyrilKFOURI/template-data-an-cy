@@ -318,12 +318,7 @@ def make_heatmap_fig(
     x_lbl = [str(c) for c in paged.columns]
     y_lbl = [str(r) for r in paged.index]
 
-    has_floats = any(isinstance(v, float) and not np.isnan(v) for row in z for v in row)
-    fmt = ".2f" if has_floats else ".0f"
-    text = [
-        [f"{v:{fmt}}" if not (isinstance(v, float) and np.isnan(v)) else "" for v in row]
-        for row in z
-    ]
+    text = [[_fmt_val(v) for v in row] for row in z]
 
     hm_kwargs: dict = dict(
         z=z.tolist(), x=x_lbl, y=y_lbl,
@@ -398,6 +393,20 @@ app.title = "Use Case 1 — Portfolio Heatmap"
 
 def _lbl(options: list[dict], value: str) -> str:
     return next((o["label"] for o in options if o["value"] == value), value)
+
+
+def _fmt_val(v, sign: bool = False) -> str:
+    if isinstance(v, float) and np.isnan(v):
+        return ""
+    prefix = "+" if sign and v > 0 else ""
+    abs_v = abs(v)
+    if abs_v >= 1_000_000:
+        return f"{prefix}{v / 1_000_000:.1f}M"
+    if abs_v >= 1_000:
+        return f"{prefix}{v / 1_000:.1f}K"
+    if isinstance(v, float):
+        return f"{prefix}{v:.1f}"
+    return f"{prefix}{int(v)}"
 
 
 def _panel_title(text: str, **extra_style):
@@ -893,8 +902,7 @@ def _sim_result(run, reset, add_vals, add_ids, rem_vals, rem_ids,
     paged_d = piv_delta.iloc[page * PAGE_SIZE: (page + 1) * PAGE_SIZE]
     if not paged_d.empty:
         abs_max = max(abs(float(piv_delta.values.max())), abs(float(piv_delta.values.min())), 1.0)
-        text_d  = [[f"{v:+.1f}" if not (isinstance(v, float) and np.isnan(v)) else "" for v in row]
-                   for row in paged_d.values]
+        text_d  = [[_fmt_val(v, sign=True) for v in row] for row in paged_d.values]
         fig_delta = go.Figure(go.Heatmap(
             z=paged_d.values.tolist(),
             x=[str(c) for c in paged_d.columns],
