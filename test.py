@@ -87,7 +87,7 @@ def load_country_monthly_data(
             dfs.append(chunk)
 
     if not dfs:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=cols or COLUMNS_TO_READ)
     return pd.concat(dfs, ignore_index=True)
 
 
@@ -668,8 +668,8 @@ def _filter_opts(country, cob_store):
     cob = cob_store or {}
     d = apply_filters(country, None, None, None)
     d = apply_cob_filter(d, cob.get("granularity", "monthly"), cob.get("period") or "")
-    brands  = [{"label": b,  "value": b}  for b  in sorted(d["BRAND_UPDATE"].dropna().unique())]
-    models  = [{"label": m,  "value": m}  for m  in sorted(d["MARKET_MODEL"].dropna().unique())]  if "MARKET_MODEL"     in d.columns else []
+    brands  = [{"label": b,  "value": b}  for b  in sorted(d["BRAND_UPDATE"].dropna().unique())]   if "BRAND_UPDATE"      in d.columns else []
+    models  = [{"label": m,  "value": m}  for m  in sorted(d["MARKET_MODEL"].dropna().unique())]   if "MARKET_MODEL"      in d.columns else []
     btypes  = [{"label": bt, "value": bt} for bt in sorted(d["MARKET_BODY_GROUP"].dropna().unique())] if "MARKET_BODY_GROUP" in d.columns else []
     return brands, models, btypes
 
