@@ -1,4 +1,5 @@
-# Définition du dictionnaire de correspondance
+# Mettez à jour votre dictionnaire avec les valeurs manquantes si nécessaire
+# ou gardez-le tel quel pour laisser les autres valeurs tranquilles
 mapping_segments = {
     "A": "City",
     "B": "Mid Small",
@@ -8,12 +9,5 @@ mapping_segments = {
     "F": "High / Luxury"
 }
 
-# Remplacement direct dans la colonne source
-nova["CON_CLF_SEGMENT"] = nova["CON_CLF_SEGMENT"].map(mapping_segments)
-
-# Ensuite, vous pouvez exécuter votre crosstab normalement
-df_1 = pd.crosstab(
-    index=[nova["NORMALISED_VEHICLE_TYPE"], nova["CON_CLF_SEGMENT"]], 
-    columns=nova["COUNTRY"]
-)
-
+# Utilisez replace() au lieu de map()
+nova["CDN_CLF_SEGMENT"] = nova["CDN_CLF_SEGMENT"].replace(mapping_segments)
