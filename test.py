@@ -1,43 +1,49 @@
 import pandas as pd
 import xlsxwriter
 
-def exporter_excel_joli(df, nom_fichier):
-    # Sécurité absolue : on ne travaille que si le DF n'est pas vide
+def exporter_excel_debug(df, nom_fichier):
+    print("--- Début du debug ---")
+    
+    # 1. Vérification du type
+    print(f"Type de df reçu: {type(df)}")
+    
+    # 2. Vérification si vide (utilisant .empty qui est la méthode safe)
     if df.empty:
-        print("Le dataframe est vide.")
+        print("Erreur: Le DataFrame est vide !")
         return
+    else:
+        print("Le DataFrame contient des données.")
 
-    # Utilisation explicite du moteur xlsxwriter
-    writer = pd.ExcelWriter(f"{nom_fichier}.xlsx", engine='xlsxwriter')
-    df.to_excel(writer, sheet_name='Données', index=True)
+    # 3. Vérification des colonnes
+    print(f"Colonnes détectées: {list(df.columns)}")
     
-    workbook  = writer.book
-    worksheet = writer.sheets['Données']
-    
-    # Définition des styles
-    header_fmt = workbook.add_format({'bold': True, 'fg_color': '#2C3E50', 'font_color': 'white', 'border': 1, 'align': 'center'})
-    cell_fmt = workbook.add_format({'border': 1, 'align': 'center'})
-    alt_fmt = workbook.add_format({'bg_color': '#F4F6F7', 'border': 1, 'align': 'center'})
+    try:
+        print("Tentative de création du writer...")
+        writer = pd.ExcelWriter(f"{nom_fichier}.xlsx", engine='xlsxwriter')
+        
+        print("Tentative d'écriture du dataframe...")
+        df.to_excel(writer, sheet_name='Données', index=True)
+        
+        workbook  = writer.book
+        worksheet = writer.sheets['Données']
+        
+        # Formats simples
+        header_fmt = workbook.add_format({'bold': True, 'fg_color': '#2C3E50', 'font_color': 'white'})
+        
+        print("Application des styles...")
+        for col_num, value in enumerate(df.columns.values):
+            worksheet.write(0, col_num + 1, value, header_fmt)
+            
+        writer.close()
+        print(f"Succès ! Fichier '{nom_fichier}.xlsx' généré.")
+        
+    except Exception as e:
+        print(f"--- ERREUR CRITIQUE DÉTECTÉE ---")
+        print(f"Type d'erreur: {type(e).__name__}")
+        print(f"Message: {e}")
+        print("--------------------------------")
 
-    # Appliquer styles en-têtes
-    for col_num, value in enumerate(df.columns.values):
-        worksheet.write(0, col_num + 1, value, header_fmt)
-
-    # Appliquer styles cellules
-    for row_num in range(len(df)):
-        fmt = alt_fmt if row_num % 2 == 0 else cell_fmt
-        for col_num in range(len(df.columns)):
-            val = df.iloc[row_num, col_num]
-            worksheet.write(row_num + 1, col_num + 1, val, fmt)
-
-    # Ajustement largeur
-    for i, col in enumerate(df.columns):
-        worksheet.set_column(i + 1, i + 1, 15)
-
-    writer.close()
-    print("Export réussi.")
-
-# --- APPEL DE LA FONCTION ---
-# Assurez-vous que 'df' est bien défini ici avant l'appel
-# Ne mettez AUCUN 'if' autour de 'df' avant cette ligne
-exporter_excel_joli(df, "mon_rapport")
+# --- APPEL ---
+# Si le code plante ici, regardez bien la console, 
+# le print affichera la ligne coupable.
+exporter_excel_debug(df, "test_debug")
