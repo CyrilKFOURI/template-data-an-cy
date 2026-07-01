@@ -392,6 +392,16 @@ def _mode_or(series: pd.Series, default=""):
     return m.iloc[0] if not m.empty else default
 
 
+def _cls_rating_label(r) -> str:
+    """CLS_GROUP_RATING is numeric on most datasets (1-11) but some snapshots store
+    it as a non-numeric string — fall back to the raw value instead of crashing."""
+    try:
+        f = float(r)
+        return str(int(f)) if f.is_integer() else str(f)
+    except (TypeError, ValueError):
+        return str(r)
+
+
 # One row per OBLIGOR_IDENTIFIER ("customer") — latest snapshot — backs the
 # "existing customer" search in the Add Vehicles wizard.
 if not UC1_DF.empty and "OBLIGOR_IDENTIFIER" in UC1_DF.columns:
@@ -473,8 +483,15 @@ COUNTERPARTY_RATING_OPTIONS = (
     _sort_by_known_order(UC1_DF["COUNTERPARTY_RATING"].dropna().unique().tolist(), RATING_GRADE_ORDER)
     if "COUNTERPARTY_RATING" in UC1_DF.columns and not UC1_DF.empty else []
 )
+def _cls_sort_key(r):
+    try:
+        return (0, float(r))
+    except (TypeError, ValueError):
+        return (1, str(r))
+
+
 CLS_RATING_OPTIONS = (
-    sorted(UC1_DF["CLS_GROUP_RATING"].dropna().unique().tolist())
+    sorted(UC1_DF["CLS_GROUP_RATING"].dropna().unique().tolist(), key=_cls_sort_key)
     if "CLS_GROUP_RATING" in UC1_DF.columns and not UC1_DF.empty else []
 )
 POWER_CATEGORY_OPTIONS = (
@@ -750,7 +767,7 @@ wizard_modal = html.Div(
                                     placeholder="Select a counterparty rating")),
                                 _wiz_field("CLS Rating (optional)", dcc.Dropdown(
                                     id="wiz-new-cls-rating",
-                                    options=[{"label": (str(int(r)) if float(r).is_integer() else str(r)), "value": r}
+                                    options=[{"label": _cls_rating_label(r), "value": r}
                                              for r in CLS_RATING_OPTIONS],
                                     placeholder="Select a CLS rating")),
                                 _wiz_field("Shared Client Flag", dcc.Dropdown(
