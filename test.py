@@ -1,26 +1,48 @@
-def compute_exposure(df, country, month, year, asset_status, aggregation="sum",
-                      country_col="COUNTRY", cob_col="COB_DATE",
-                      status_col="NOVA_ASSET_STATUS", customer_col="ID_CUSTOMER"):
-    mask = (df[country_col] == country) & (df[cob_col].dt.year == year) & (df[cob_col].dt.month == month)
-    if str(asset_status).upper() != "ALL":
-        mask &= df[status_col] == asset_status
-    d = df[mask].copy()
-    if d.empty:
-        return 0.0
-    d["EXPOSURE"] = d["EXPOSURE_AMOUNT_LTR"].fillna(0) + d["PENDING_ORDERS"].fillna(0)
-    d = d.sort_values(cob_col).drop_duplicates(subset=[customer_col], keep="last")
-    return float(d["EXPOSURE"].sum() if aggregation == "sum" else d["EXPOSURE"].mean())
+import pandas as pd
+import matplotlib.pyplot as plt
 
+def power_category_summary(df):
+    """
+    Create a pie chart and a summary table for POWER_CATEGORY.
 
-def format_millions(value):
-    s = f"{value / 1_000_000:.4f}".rstrip("0").rstrip(".")
-    return s if s else "0"
+    Returns
+    -------
+    summary : pd.DataFrame
+        Columns:
+        - Energy
+        - Share (%)
+        - Nb of Units
+    """
 
+    # Count occurrences
+    counts = df["POWER_CATEGORY"].value_counts(dropna=False)
 
-exposure = compute_exposure(UC1_DF, "LU", 12, 2025, "IN FLEET", aggregation="sum")
-print(f"L'exposition est de {format_millions(exposure)} millions")
+    # Summary table
+    summary = pd.DataFrame({
+        "Energy": counts.index.astype(str),
+        "Share (%)": (counts / counts.sum() * 100).round(2),
+        "Nb of Units": counts.values
+    })
 
+    # Add total row
+    total_row = pd.DataFrame({
+        "Energy": ["Total"],
+        "Share (%)": [100.00],
+        "Nb of Units": [counts.sum()]
+    })
 
+    summary = pd.concat([summary, total_row], ignore_index=True)
 
-exposure = compute_exposure(UC1_DF, "LU", 12, 2025, "ALL", aggregation="sum")
-print(f"L'exposition est de {format_millions(exposure)} millions")
+    # Pie chart (without Total row)
+    plt.figure(figsize=(7, 7))
+    plt.pie(
+        counts,
+        labels=counts.index.astype(str),
+        autopct="%1.1f%%",
+        startangle=90
+    )
+    plt.title("Distribution of Energy Categories")
+    plt.axis("equal")
+    plt.show()
+
+    return summary
