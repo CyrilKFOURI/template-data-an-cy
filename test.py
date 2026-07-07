@@ -444,21 +444,26 @@ def _sort_by_known_order(values, order) -> list:
 RATING_ORDER_FIELDS = {"GROUP_RATING", "COUNTERPARTY_RATING"}
 
 
+def _ordered_axis(values, col: str, is_y: bool = False) -> list:
+    """Order axis category values: known grade order for rating fields (reversed
+    on the y-axis, since Plotly renders a heatmap's last y entry at the top and
+    the first at the bottom — opposite of the x-axis), plain sort otherwise.
+    Used both to reorder a single pivot's axis and to build the union index/columns
+    when aligning two pivots (e.g. Original vs Simulated) — any reindex done after
+    this must reuse it instead of a plain sorted(), or the rating order is lost."""
+    if col in RATING_ORDER_FIELDS:
+        ordered = _sort_by_known_order(list(values), RATING_GRADE_ORDER)
+        return list(reversed(ordered)) if is_y else ordered
+    return sorted(values)
+
+
 def _apply_rating_order(piv: pd.DataFrame, y_col: str, x_col: str) -> pd.DataFrame:
-    """GROUP_RATING/COUNTERPARTY_RATING are grade strings (01, 02+, 02, 02-, ...,
-    10, 11) that sort wrong alphabetically (e.g. "10" before "2") — reorder them
-    using the known grade order instead of pandas' default lexicographic sort.
-    Plotly renders a heatmap's y-axis with the last array entry at the top and
-    the first at the bottom (opposite of the x-axis, where the first entry is on
-    the left) — so the y-axis needs the reversed order to read 01→11 top-to-bottom
-    the same way the x-axis reads 01→11 left-to-right."""
     if piv.empty:
         return piv
     if y_col in RATING_ORDER_FIELDS:
-        ordered = _sort_by_known_order(piv.index.tolist(), RATING_GRADE_ORDER)
-        piv = piv.reindex(index=list(reversed(ordered)))
+        piv = piv.reindex(index=_ordered_axis(piv.index.tolist(), y_col, is_y=True))
     if x_col in RATING_ORDER_FIELDS:
-        piv = piv.reindex(columns=_sort_by_known_order(piv.columns.tolist(), RATING_GRADE_ORDER))
+        piv = piv.reindex(columns=_ordered_axis(piv.columns.tolist(), x_col, is_y=False))
     return piv
 
 
@@ -1875,8 +1880,8 @@ def _sim_result(run, reset, rem_vals, rem_ids, batch_data,
 
     piv_orig  = build_pivot(d_orig, y_col, x_col, metric)
     piv_sim   = build_pivot(d_sim,  y_col, x_col, metric)
-    all_cols  = sorted(set(piv_orig.columns) | set(piv_sim.columns))
-    all_idx   = sorted(set(piv_orig.index)   | set(piv_sim.index))
+    all_cols  = _ordered_axis(set(piv_orig.columns) | set(piv_sim.columns), x_col, is_y=False)
+    all_idx   = _ordered_axis(set(piv_orig.index)   | set(piv_sim.index),   y_col, is_y=True)
     piv_orig  = piv_orig.reindex(index=all_idx, columns=all_cols, fill_value=0)
     piv_sim   = piv_sim.reindex( index=all_idx, columns=all_cols, fill_value=0)
     piv_delta = piv_sim - piv_orig
