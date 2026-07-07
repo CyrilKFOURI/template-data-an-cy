@@ -241,7 +241,7 @@ SIM_Y_OPTIONS = [
 ]
 
 METRIC_OPTIONS = [
-    {"label": "Volume (# Contracts)",       "value": "volume"},
+    {"label": "Volume (Contracts)",         "value": "volume"},
     {"label": "Exposure",                   "value": "exposure"},
     {"label": "Risk Asset Intensity",       "value": "intensite_risk_asset"},
 ]
@@ -307,7 +307,7 @@ def build_exposure_pivot(d: pd.DataFrame, y_col: str, x_col: str, aggregation: s
 
 def build_pivot(d: pd.DataFrame, y_col: str, x_col: str, metric: str, aggregation: str = "sum") -> pd.DataFrame:
     if metric == "exposure":
-        return build_exposure_pivot(d, y_col, x_col, aggregation)
+        return _apply_rating_order(build_exposure_pivot(d, y_col, x_col, aggregation), y_col, x_col)
 
     keep = list({y_col, x_col} | {c for c in UNIQUE_KEY_COLS if c in d.columns} | {"COB_DATE", "VEHICLE_PRICE_EUR"} & set(d.columns))
     d = d[[c for c in keep if c in d.columns]].dropna(subset=[y_col, x_col])
@@ -326,7 +326,7 @@ def build_pivot(d: pd.DataFrame, y_col: str, x_col: str, metric: str, aggregatio
     else:  # "volume" or fallback
         piv = d.groupby([y_col, x_col]).size().unstack(x_col, fill_value=0)
 
-    return piv
+    return _apply_rating_order(piv, y_col, x_col)
 
 
 def compute_total_exposure(d: pd.DataFrame, aggregation: str = "sum") -> float:
@@ -439,6 +439,22 @@ RATING_GRADE_ORDER = [
 def _sort_by_known_order(values, order) -> list:
     order_index = {v: i for i, v in enumerate(order)}
     return sorted(values, key=lambda v: order_index.get(str(v), len(order)))
+
+
+RATING_ORDER_FIELDS = {"GROUP_RATING", "COUNTERPARTY_RATING"}
+
+
+def _apply_rating_order(piv: pd.DataFrame, y_col: str, x_col: str) -> pd.DataFrame:
+    """GROUP_RATING/COUNTERPARTY_RATING are grade strings (01, 02+, 02, 02-, ...,
+    10, 11) that sort wrong alphabetically (e.g. "10" before "2") — reorder them
+    using the known grade order instead of pandas' default lexicographic sort."""
+    if piv.empty:
+        return piv
+    if y_col in RATING_ORDER_FIELDS:
+        piv = piv.reindex(index=_sort_by_known_order(piv.index.tolist(), RATING_GRADE_ORDER))
+    if x_col in RATING_ORDER_FIELDS:
+        piv = piv.reindex(columns=_sort_by_known_order(piv.columns.tolist(), RATING_GRADE_ORDER))
+    return piv
 
 
 def _co2_bucket_low(bucket: str) -> int:
