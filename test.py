@@ -246,11 +246,6 @@ METRIC_OPTIONS = [
     {"label": "Risk Asset Intensity",       "value": "intensite_risk_asset"},
 ]
 
-AGGREGATION_OPTIONS = [
-    {"label": "Sum",  "value": "sum"},
-    {"label": "Mean", "value": "mean"},
-]
-
 ASSET_STATUS_OPTIONS = [{"label": "ALL", "value": "ALL"}] + [
     {"label": s, "value": s} for s in _asset_statuses_avail
 ]
@@ -1001,22 +996,7 @@ app.layout = html.Div(
                                      clearable=False, style={"marginBottom": "12px"}),
                         html.Div("Metric", style={"fontSize": "11px", "color": "#718096", "fontWeight": "600", "marginBottom": "4px"}),
                         dcc.Dropdown(id="f-metric", options=METRIC_OPTIONS, value="volume",
-                                     clearable=False, style={"marginBottom": "12px"}),
-                        html.Div("Aggregation (Exposure only)", style={"fontSize": "11px", "color": "#718096", "fontWeight": "600", "marginBottom": "4px"}),
-                        dcc.Dropdown(id="f-aggregation", options=AGGREGATION_OPTIONS, value="sum",
-                                     clearable=False, style={"marginBottom": "12px"}),
-                        html.Div("Totals", style={"fontSize": "11px", "color": "#718096", "fontWeight": "600", "marginBottom": "4px"}),
-                        dcc.RadioItems(
-                            id="f-totals-mode",
-                            options=[
-                                {"label": " Grid with totals", "value": "grid"},
-                                {"label": " Single total only", "value": "single"},
-                            ],
-                            value="grid",
-                            labelStyle={"display": "block", "fontSize": "12px", "marginBottom": "4px", "cursor": "pointer"},
-                            inputStyle={"marginRight": "6px"},
-                            style={"marginBottom": "20px"},
-                        ),
+                                     clearable=False, style={"marginBottom": "20px"}),
 
                         html.Button("Refresh", id="btn-refresh", n_clicks=0,
                                     style={"width": "100%", "padding": "8px", "fontWeight": "600",
@@ -1073,7 +1053,6 @@ app.layout = html.Div(
                                            "marginBottom": "12px"},
                                 ),
                                 dcc.Graph(id="heatmap", config={"displayModeBar": False}),
-                                html.Div(id="single-total-tile", style={"display": "none"}),
                             ],
                             style={"background": "#ffffff", "borderRadius": "8px",
                                    "border": "1px solid #e2e8f0", "padding": "20px",
@@ -1213,15 +1192,18 @@ def _cob_store(gran, period):
     Output("f-bodytype","options"),
     Input("f-country", "value"),
     Input("f-asset-status", "value"),
+    Input("f-brand", "value"),
     State("cob-store",  "data"),
 )
-def _filter_opts(country, asset_status, cob_store):
+def _filter_opts(country, asset_status, brands_selected, cob_store):
     cob = cob_store or {}
     d = apply_filters(country, None, None, None, asset_status)
     d = apply_cob_filter(d, cob.get("granularity", "monthly"), cob.get("period") or "")
     brands  = [{"label": b,  "value": b}  for b  in sorted(d["BRAND_UPDATE"].dropna().unique())]   if "BRAND_UPDATE"      in d.columns else []
-    models  = [{"label": m,  "value": m}  for m  in sorted(d["MARKET_MODEL"].dropna().unique())]   if "MARKET_MODEL"      in d.columns else []
-    btypes  = [{"label": bt, "value": bt} for bt in sorted(d["MARKET_BODY_GROUP"].dropna().unique())] if "MARKET_BODY_GROUP" in d.columns else []
+
+    d_scoped = d[d["BRAND_UPDATE"].isin(brands_selected)] if brands_selected else d
+    models  = [{"label": m,  "value": m}  for m  in sorted(d_scoped["MARKET_MODEL"].dropna().unique())]   if "MARKET_MODEL"      in d_scoped.columns else []
+    btypes  = [{"label": bt, "value": bt} for bt in sorted(d_scoped["MARKET_BODY_GROUP"].dropna().unique())] if "MARKET_BODY_GROUP" in d_scoped.columns else []
     return brands, models, btypes
 
 
@@ -1272,12 +1254,11 @@ def _refresh_ts(n):
 # Callbacks — Main heatmap
 # =============================================================================
 
-def _kpi_text(metric: str, total: float, aggregation: str) -> str:
+def _kpi_text(metric: str, total: float) -> str:
     m_lbl = _lbl(METRIC_OPTIONS, metric)
     if metric == "volume":
         return f"Total {m_lbl}: {int(total):,}"
-    agg_lbl = "average" if aggregation == "mean" else "total"
-    return f"{m_lbl} ({agg_lbl}): {format_millions(total)} million"
+    return f"{m_lbl} (total): {format_millions(total)} million"
 
 
 @app.callback(
@@ -1286,9 +1267,6 @@ def _kpi_text(metric: str, total: float, aggregation: str) -> str:
     Output("page-info",     "children"),
     Output("npages-store",  "data"),
     Output("kpi-headline",  "children"),
-    Output("heatmap",       "style"),
-    Output("single-total-tile", "style"),
-    Output("single-total-tile", "children"),
     Input("page-store",  "data"),
     Input("refresh-ts",  "data"),
     State("f-country",   "value"),
@@ -1299,47 +1277,32 @@ def _kpi_text(metric: str, total: float, aggregation: str) -> str:
     State("f-y",         "value"),
     State("f-x",         "value"),
     State("f-metric",    "value"),
-    State("f-aggregation", "value"),
-    State("f-totals-mode", "value"),
     State("cob-store",   "data"),
 )
 def _heatmap(page, _ts, country, asset_status, brands, models, bodytypes, y_col, x_col,
-             metric, aggregation, totals_mode, cob_store):
-    page        = page or 0
-    y_col       = y_col  or "BRAND_UPDATE"
-    x_col       = x_col  or "GROUP_RATING"
-    metric      = metric or "volume"
-    aggregation = aggregation or "sum"
-    totals_mode = totals_mode or "grid"
-    cob         = cob_store or {}
+             metric, cob_store):
+    page   = page or 0
+    y_col  = y_col  or "BRAND_UPDATE"
+    x_col  = x_col  or "GROUP_RATING"
+    metric = metric or "volume"
+    cob    = cob_store or {}
 
     d = apply_filters(country, brands, models, bodytypes, asset_status)
     d = apply_cob_filter(d, cob.get("granularity", "monthly"), cob.get("period") or "")
 
-    total_value  = compute_total_metric(d, metric, aggregation)
-    kpi_text     = _kpi_text(metric, total_value, aggregation)
+    total_value  = compute_total_metric(d, metric)
+    kpi_text     = _kpi_text(metric, total_value)
     period_label = cob.get("period") or "All"
     title_text   = f"{_lbl(METRIC_OPTIONS, metric)}  ·  {_lbl(Y_OPTIONS, y_col)} × {_lbl(X_OPTIONS, x_col)}  [{period_label}]"
 
-    if totals_mode == "single":
-        big_value = f"{int(total_value):,}" if metric == "volume" else f"{format_millions(total_value)}M"
-        tile = html.Div([
-            html.Div(_lbl(METRIC_OPTIONS, metric), style={
-                "fontSize": "12px", "color": "#718096", "fontWeight": "700",
-                "textTransform": "uppercase", "letterSpacing": "0.04em"}),
-            html.Div(big_value, style={"fontSize": "42px", "fontWeight": "800", "color": "#1a1a2e", "margin": "6px 0"}),
-            html.Div(f"[{period_label}]", style={"fontSize": "12px", "color": "#a0aec0"}),
-        ], style={"textAlign": "center", "padding": "40px 20px"})
-        return {}, title_text, "Page 1 / 1", 1, kpi_text, {"display": "none"}, {"display": "block"}, tile
-
-    piv     = build_pivot(d, y_col, x_col, metric, aggregation)
+    piv     = build_pivot(d, y_col, x_col, metric)
     n_rows  = len(piv)
     n_pages = max(1, (n_rows + PAGE_SIZE - 1) // PAGE_SIZE)
     page    = max(0, min(page, n_pages - 1))
 
     fig  = make_heatmap_fig(piv, title_text, "Blues", page, show_totals=True)
     info = f"Page {page + 1} / {n_pages}  ({n_rows} categories)"
-    return fig, title_text, info, n_pages, kpi_text, {"display": "block"}, {"display": "none"}, None
+    return fig, title_text, info, n_pages, kpi_text
 
 
 # =============================================================================
@@ -1847,13 +1810,12 @@ def _remove_batch_item(n_clicks_list, batch_data):
     State("sim-y",        "value"),
     State("f-x",          "value"),
     State("f-metric",     "value"),
-    State("f-aggregation", "value"),
     State("page-store",   "data"),
     State("cob-store",    "data"),
     prevent_initial_call=True,
 )
 def _sim_result(run, reset, rem_vals, rem_ids, batch_data,
-                country, asset_status, brands, models, bodytypes, y_col, x_col, metric, aggregation,
+                country, asset_status, brands, models, bodytypes, y_col, x_col, metric,
                 page, cob_store):
     trig = callback_context.triggered[0]["prop_id"] if callback_context.triggered else ""
     if "reset" in trig:
@@ -1862,12 +1824,11 @@ def _sim_result(run, reset, rem_vals, rem_ids, batch_data,
     rem_dict = {id_obj["index"]: (v or 0) for id_obj, v in zip(rem_ids, rem_vals)}
     batch_data = batch_data or []
 
-    y_col       = y_col  or SIM_Y_OPTIONS[0]["value"]
-    x_col       = x_col  or "GROUP_RATING"
-    metric      = metric or "volume"
-    aggregation = aggregation or "sum"
-    page        = page or 0
-    cob         = cob_store or {}
+    y_col  = y_col  or SIM_Y_OPTIONS[0]["value"]
+    x_col  = x_col  or "GROUP_RATING"
+    metric = metric or "volume"
+    page   = page or 0
+    cob    = cob_store or {}
 
     d_orig = apply_filters(country, brands, models, bodytypes, asset_status)
     d_orig = apply_cob_filter(d_orig, cob.get("granularity", "monthly"), cob.get("period") or "")
@@ -1891,8 +1852,8 @@ def _sim_result(run, reset, rem_vals, rem_ids, batch_data,
     if synth_parts:
         d_sim = pd.concat([d_sim] + synth_parts, ignore_index=True)
 
-    piv_orig  = build_pivot(d_orig, y_col, x_col, metric, aggregation)
-    piv_sim   = build_pivot(d_sim,  y_col, x_col, metric, aggregation)
+    piv_orig  = build_pivot(d_orig, y_col, x_col, metric)
+    piv_sim   = build_pivot(d_sim,  y_col, x_col, metric)
     all_cols  = sorted(set(piv_orig.columns) | set(piv_sim.columns))
     all_idx   = sorted(set(piv_orig.index)   | set(piv_sim.index))
     piv_orig  = piv_orig.reindex(index=all_idx, columns=all_cols, fill_value=0)
