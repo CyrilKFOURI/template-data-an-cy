@@ -4,7 +4,6 @@ import ipywidgets as widgets
 from IPython.display import display
 
 
-# Liste des pays
 countries = sorted(nova["COUNTRY"].dropna().unique())
 
 country_dropdown = widgets.Dropdown(
@@ -16,8 +15,7 @@ country_dropdown = widgets.Dropdown(
 
 
 def plot_top_models(country):
-    
-    # Filtrer le pays choisi
+
     df_country = nova[nova["COUNTRY"] == country]
 
     # Top 10 modèles
@@ -30,41 +28,51 @@ def plot_top_models(country):
 
     top10.columns = ["MARKET_MODEL", "Volume"]
 
-    # Ajouter le pourcentage
+    # Pourcentage
     top10["Share (%)"] = (
         top10["Volume"] / top10["Volume"].sum() * 100
     ).round(1)
 
-    # Ajouter la marque
-    top10["BRAND_UPDATE"] = top10["MARKET_MODEL"].map(
-        df_country.drop_duplicates("MARKET_MODEL")
+    # Marque associée
+    brand_map = (
+        df_country[["MARKET_MODEL", "BRAND_UPDATE"]]
+        .drop_duplicates("MARKET_MODEL")
         .set_index("MARKET_MODEL")["BRAND_UPDATE"]
     )
 
-    # Affichage
-    fig = px.pie(
+    top10["BRAND_UPDATE"] = top10["MARKET_MODEL"].map(brand_map)
+
+
+    fig = px.bar(
         top10,
-        values="Volume",
-        names="MARKET_MODEL",
+        x="MARKET_MODEL",
+        y="Volume",
+        text="Volume",
         title=f"Top 10 Vehicle Models - {country}",
-        hole=0.45,
-        hover_data=["BRAND_UPDATE", "Volume", "Share (%)"]
+        custom_data=["BRAND_UPDATE", "Share (%)"]
     )
 
     fig.update_traces(
-        textinfo="label+percent",
+        textposition="outside",
         hovertemplate=
-        "<b>%{label}</b><br>" +
+        "<b>%{x}</b><br>" +
         "Brand: %{customdata[0]}<br>" +
-        "Volume: %{customdata[1]}<br>" +
-        "Share: %{customdata[2]}%"
+        "Volume: %{y}<br>" +
+        "Share: %{customdata[1]}%<extra></extra>"
+    )
+
+    fig.update_layout(
+        xaxis_title="Vehicle Model",
+        yaxis_title="Number of Vehicles",
+        xaxis_tickangle=-45
     )
 
     fig.show()
 
 
-# Interaction avec le filtre
-widgets.interactive(
-    plot_top_models,
-    country=country_dropdown
+display(
+    widgets.interactive(
+        plot_top_models,
+        country=country_dropdown
+    )
 )
