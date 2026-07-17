@@ -280,11 +280,12 @@ def compute_row_exposure(d: pd.DataFrame) -> pd.Series:
 
 
 def _fill_rating_na(d: pd.DataFrame, *cols: str) -> pd.DataFrame:
-    """Missing GROUP_RATING/COUNTERPARTY_RATING become the literal "NR" category
-    instead of being dropped, so unrated contracts still show up on the heatmap."""
+    """Missing GROUP_RATING/COUNTERPARTY_RATING/CLS_GROUP_RATING become the literal
+    "NR" category instead of being dropped, so unrated contracts still show up on
+    the heatmap instead of just vanishing from the axis."""
     d = d.copy()
     for c in cols:
-        if c in RATING_ORDER_FIELDS and c in d.columns:
+        if c in RATING_FILL_FIELDS and c in d.columns:
             d[c] = d[c].fillna(RATING_NR_LABEL)
     return d
 
@@ -423,6 +424,8 @@ def make_heatmap_fig(
 # =============================================================================
 
 RATING_ORDER_FIELDS = {"GROUP_RATING", "COUNTERPARTY_RATING"}
+CLS_RATING_FIELD = "CLS_GROUP_RATING"
+RATING_FILL_FIELDS = RATING_ORDER_FIELDS | {CLS_RATING_FIELD}
 RATING_NR_LABEL = "NR"
 
 
@@ -446,6 +449,20 @@ def _rating_sort_key(value) -> tuple:
     return (grade, suffix_rank)
 
 
+def _cls_axis_sort_key(value) -> tuple:
+    """Sort key for CLS_GROUP_RATING on a heatmap axis: numeric grade order, with
+    missing/blank ratings ("NR") always sorting first — same convention as
+    _rating_sort_key, just for CLS's plain numeric scale instead of the
+    grade+suffix scale used by GROUP_RATING/COUNTERPARTY_RATING."""
+    v = str(value).strip().upper()
+    if v in ("", RATING_NR_LABEL, "NAN", "NONE"):
+        return (-1, 0.0)
+    try:
+        return (0, float(value))
+    except (TypeError, ValueError):
+        return (1, 0.0)
+
+
 def _ordered_axis(values, col: str, is_y: bool = False) -> list:
     """Order axis category values: rating grade order for rating fields (reversed
     on the y-axis, since Plotly renders a heatmap's last y entry at the top and
@@ -456,15 +473,18 @@ def _ordered_axis(values, col: str, is_y: bool = False) -> list:
     if col in RATING_ORDER_FIELDS:
         ordered = sorted(values, key=_rating_sort_key)
         return list(reversed(ordered)) if is_y else ordered
+    if col == CLS_RATING_FIELD:
+        ordered = sorted(values, key=_cls_axis_sort_key)
+        return list(reversed(ordered)) if is_y else ordered
     return sorted(values)
 
 
 def _apply_rating_order(piv: pd.DataFrame, y_col: str, x_col: str) -> pd.DataFrame:
     if piv.empty:
         return piv
-    if y_col in RATING_ORDER_FIELDS:
+    if y_col in RATING_FILL_FIELDS:
         piv = piv.reindex(index=_ordered_axis(piv.index.tolist(), y_col, is_y=True))
-    if x_col in RATING_ORDER_FIELDS:
+    if x_col in RATING_FILL_FIELDS:
         piv = piv.reindex(columns=_ordered_axis(piv.columns.tolist(), x_col, is_y=False))
     return piv
 
@@ -502,18 +522,28 @@ def _cls_rating_label(r) -> str:
         return str(r)
 
 
-# One row per OBLIGOR_IDENTIFIER ("customer") — latest snapshot — backs the
-# "existing customer" search in the Add Vehicles wizard.
+# One row per OBLIGOR_IDENTIFIER ("customer") — latest known value per field —
+# backs the "existing customer" search in the Add Vehicles wizard.
 if not UC1_DF.empty and "OBLIGOR_IDENTIFIER" in UC1_DF.columns:
     _ob_cols = [c for c in [
         "OBLIGOR_IDENTIFIER", "COB_DATE", "COUNTRY", "GROUP_RATING",
         "COUNTERPARTY_RATING", "CLS_GROUP_RATING",
         "ARVAL_INDUSTRY_CODE_CLS_DESCRIPTION", "SHARED_CLIENT_FLAG",
     ] if c in UC1_DF.columns]
+    _ob_src = UC1_DF[_ob_cols].dropna(subset=["OBLIGOR_IDENTIFIER"]).sort_values("COB_DATE")
+    _ob_fill_cols = [c for c in [
+        "COUNTRY", "GROUP_RATING", "COUNTERPARTY_RATING", "CLS_GROUP_RATING",
+        "ARVAL_INDUSTRY_CODE_CLS_DESCRIPTION", "SHARED_CLIENT_FLAG",
+    ] if c in _ob_src.columns]
+    # Each field carries forward the customer's latest *non-null* value across
+    # snapshots. Ratings are populated independently per row in this synthetic
+    # dataset, so the very last snapshot alone can be blank even when an earlier
+    # period for the same customer has a known rating — without this, picking
+    # "existing customer" in the Add Vehicles wizard would sometimes add vehicles
+    # with a blank rating instead of that customer's real one.
+    _ob_src[_ob_fill_cols] = _ob_src.groupby("OBLIGOR_IDENTIFIER")[_ob_fill_cols].ffill()
     OBLIGOR_PROFILES = (
-        UC1_DF[_ob_cols].dropna(subset=["OBLIGOR_IDENTIFIER"])
-        .sort_values("COB_DATE")
-        .drop_duplicates(subset=["OBLIGOR_IDENTIFIER"], keep="last")
+        _ob_src.drop_duplicates(subset=["OBLIGOR_IDENTIFIER"], keep="last")
         .set_index("OBLIGOR_IDENTIFIER")
     )
 else:
