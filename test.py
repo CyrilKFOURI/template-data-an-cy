@@ -653,12 +653,12 @@ def _narrow_by_removal_filters(d: pd.DataFrame, brand, model=None, bodytype=None
     return out
 
 
-def count_matching_for_removal(country, brands_f, models_f, bodytypes_f, asset_status, cob_store,
-                                brand, model=None, bodytype=None, power=None, co2=None) -> int:
-    """Number of distinct vehicles (same contract-key dedup as the rest of the tool)
-    that match the current dashboard filters plus the Remove Vehicles wizard's own
-    brand/model/body type/power/CO2 picks. Drives the live counter shown throughout
-    the wizard."""
+def _rwiz_scoped_df(country, brands_f, models_f, bodytypes_f, asset_status, cob_store,
+                     brand=None, model=None, bodytype=None, power=None, co2=None) -> pd.DataFrame:
+    """Dashboard-filtered, COB-filtered, contract-deduped vehicles narrowed by
+    whichever Remove Vehicles wizard fields are already picked. Shared by the
+    live counter and by each step's option list, so a dropdown never offers a
+    choice that would leave zero matching vehicles."""
     cob = cob_store or {}
     d = apply_filters(country, brands_f, models_f, bodytypes_f, asset_status)
     d = apply_cob_filter(d, cob.get("granularity", "monthly"), cob.get("period") or "")
@@ -667,8 +667,35 @@ def count_matching_for_removal(country, brands_f, models_f, bodytypes_f, asset_s
         if "COB_DATE" in d.columns:
             d = d.sort_values("COB_DATE")
         d = d.drop_duplicates(subset=keys, keep="last")
-    d = _narrow_by_removal_filters(d, brand, model, bodytype, power, co2)
+    return _narrow_by_removal_filters(d, brand, model, bodytype, power, co2)
+
+
+def count_matching_for_removal(country, brands_f, models_f, bodytypes_f, asset_status, cob_store,
+                                brand, model=None, bodytype=None, power=None, co2=None) -> int:
+    """Number of distinct vehicles (same contract-key dedup as the rest of the tool)
+    that match the current dashboard filters plus the Remove Vehicles wizard's own
+    brand/model/body type/power/CO2 picks. Drives the live counter shown throughout
+    the wizard."""
+    d = _rwiz_scoped_df(country, brands_f, models_f, bodytypes_f, asset_status, cob_store,
+                         brand, model, bodytype, power, co2)
     return int(len(d))
+
+
+_RWIZ_FIELD_CHAIN = ["BRAND_UPDATE", "MARKET_MODEL", "MARKET_BODY_GROUP", "POWER_CATEGORY", "CO2_BUCKET"]
+
+
+def _rwiz_valid_options(d: pd.DataFrame, field: str, remaining_fields: list[str]) -> list:
+    """Values of `field` worth offering in a Remove Vehicles wizard dropdown: not
+    just values with a matching vehicle, but values for which at least one vehicle
+    also has every field still to come (`remaining_fields`) populated. Without this,
+    a field could show a value whose only matching vehicles are missing one of the
+    later fields, dead-ending the wizard on an empty next dropdown instead of a
+    genuine "0 vehicles" message."""
+    if field not in d.columns:
+        return []
+    needed = [field] + [f for f in remaining_fields if f in d.columns]
+    valid = d.dropna(subset=needed)
+    return sorted(valid[field].dropna().unique().tolist())
 
 
 def apply_removal_batches(d: pd.DataFrame, removal_entries: list[dict]) -> pd.DataFrame:
@@ -1933,52 +1960,112 @@ def _remove_batch_item(n_clicks_list, batch_data):
 
 # =============================================================================
 # Callbacks — Remove Vehicles wizard: cascading options
+# Each dropdown is scoped to the current dashboard filters/COB period plus every
+# field already picked earlier in the wizard, so it only ever offers choices that
+# leave at least one matching vehicle — never a combination showing "0 vehicles".
 # =============================================================================
+
+@app.callback(
+    Output("rwiz-brand", "options"),
+    Input("btn-open-remove-wizard", "n_clicks"),
+    State("f-country", "value"),
+    State("f-asset-status", "value"),
+    State("f-brand", "value"),
+    State("f-model", "value"),
+    State("f-bodytype", "value"),
+    State("cob-store", "data"),
+    prevent_initial_call=True,
+)
+def _rwiz_brand_options(_open, country, asset_status, brands_f, models_f, bodytypes_f, cob_store):
+    d = _rwiz_scoped_df(country, brands_f, models_f, bodytypes_f, asset_status, cob_store)
+    brands = _rwiz_valid_options(d, "BRAND_UPDATE", _RWIZ_FIELD_CHAIN[1:])
+    return [{"label": b, "value": b} for b in brands]
+
 
 @app.callback(
     Output("rwiz-model", "options"),
     Output("rwiz-model", "value"),
+    Input("rwiz-brand", "value"),
+    State("f-country", "value"),
+    State("f-asset-status", "value"),
+    State("f-brand", "value"),
+    State("f-model", "value"),
+    State("f-bodytype", "value"),
+    State("cob-store", "data"),
+    prevent_initial_call=True,
+)
+def _rwiz_model_options(brand, country, asset_status, brands_f, models_f, bodytypes_f, cob_store):
+    if not brand:
+        return [], None
+    d = _rwiz_scoped_df(country, brands_f, models_f, bodytypes_f, asset_status, cob_store, brand)
+    models = _rwiz_valid_options(d, "MARKET_MODEL", _RWIZ_FIELD_CHAIN[2:])
+    return [{"label": m, "value": m} for m in models], None
+
+
+@app.callback(
     Output("rwiz-bodytype", "options"),
     Output("rwiz-bodytype", "value"),
     Input("rwiz-brand", "value"),
+    Input("rwiz-model", "value"),
+    State("f-country", "value"),
+    State("f-asset-status", "value"),
+    State("f-brand", "value"),
+    State("f-model", "value"),
+    State("f-bodytype", "value"),
+    State("cob-store", "data"),
     prevent_initial_call=True,
 )
-def _rwiz_brand_change(brand):
-    models  = BRAND_MODEL_MAP.get(brand, [])    if brand else []
-    btypes  = BRAND_BODYTYPE_MAP.get(brand, []) if brand else []
-    return (
-        [{"label": m, "value": m} for m in models], None,
-        [{"label": b, "value": b} for b in btypes], None,
-    )
+def _rwiz_bodytype_options(brand, model, country, asset_status, brands_f, models_f, bodytypes_f, cob_store):
+    if not brand:
+        return [], None
+    d = _rwiz_scoped_df(country, brands_f, models_f, bodytypes_f, asset_status, cob_store, brand, model)
+    btypes = _rwiz_valid_options(d, "MARKET_BODY_GROUP", _RWIZ_FIELD_CHAIN[3:])
+    return [{"label": b, "value": b} for b in btypes], None
 
 
 @app.callback(
     Output("rwiz-power", "options"),
     Output("rwiz-power", "value"),
+    Input("rwiz-brand", "value"),
+    Input("rwiz-model", "value"),
+    Input("rwiz-bodytype", "value"),
+    State("f-country", "value"),
+    State("f-asset-status", "value"),
+    State("f-brand", "value"),
+    State("f-model", "value"),
+    State("f-bodytype", "value"),
+    State("cob-store", "data"),
+    prevent_initial_call=True,
+)
+def _rwiz_power_options(brand, model, bodytype, country, asset_status, brands_f, models_f, bodytypes_f, cob_store):
+    if not brand:
+        return [], None
+    d = _rwiz_scoped_df(country, brands_f, models_f, bodytypes_f, asset_status, cob_store, brand, model, bodytype)
+    powers = _rwiz_valid_options(d, "POWER_CATEGORY", _RWIZ_FIELD_CHAIN[4:])
+    return [{"label": p, "value": p} for p in powers], None
+
+
+@app.callback(
     Output("rwiz-co2", "options"),
     Output("rwiz-co2", "value"),
     Input("rwiz-brand", "value"),
     Input("rwiz-model", "value"),
+    Input("rwiz-bodytype", "value"),
+    Input("rwiz-power", "value"),
+    State("f-country", "value"),
+    State("f-asset-status", "value"),
+    State("f-brand", "value"),
+    State("f-model", "value"),
+    State("f-bodytype", "value"),
+    State("cob-store", "data"),
     prevent_initial_call=True,
 )
-def _rwiz_characteristics_options(brand, model):
+def _rwiz_co2_options(brand, model, bodytype, power, country, asset_status, brands_f, models_f, bodytypes_f, cob_store):
     if not brand:
-        return [], None, [], None
-    sub = UC1_DF[UC1_DF["BRAND_UPDATE"] == brand]
-    if model and "MARKET_MODEL" in UC1_DF.columns:
-        model_sub = sub[sub["MARKET_MODEL"] == model]
-        if not model_sub.empty:
-            sub = model_sub
-    powers = sorted(sub["POWER_CATEGORY"].dropna().unique().tolist()) if "POWER_CATEGORY" in sub.columns else []
-    if not powers:
-        powers = POWER_CATEGORY_OPTIONS
-    co2s = sorted(sub["CO2_BUCKET"].dropna().unique().tolist(), key=_co2_bucket_low) if "CO2_BUCKET" in sub.columns else []
-    if not co2s:
-        co2s = CO2_BUCKET_OPTIONS
-    return (
-        [{"label": p, "value": p} for p in powers], None,
-        [{"label": c, "value": c} for c in co2s], None,
-    )
+        return [], None
+    d = _rwiz_scoped_df(country, brands_f, models_f, bodytypes_f, asset_status, cob_store, brand, model, bodytype, power)
+    co2s = sorted(d["CO2_BUCKET"].dropna().unique().tolist(), key=_co2_bucket_low) if "CO2_BUCKET" in d.columns else []
+    return [{"label": c, "value": c} for c in co2s], None
 
 
 @app.callback(
