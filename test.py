@@ -831,7 +831,7 @@ REMOVE_PRIMARY_BTN_STYLE = {
 NUMBER_INPUT_STYLE = {"width": "100%", "padding": "8px", "borderRadius": "6px", "border": "1px solid #cbd5e0"}
 
 WIZ_STEP_LABELS = ["Quantity & Brand", "Model & Body Type", "Characteristics", "Customer", "Price & Review"]
-REMOVE_WIZ_STEP_LABELS = ["Quantity & Brand", "Model & Body Type", "Characteristics", "Review & Remove"]
+REMOVE_WIZ_STEP_LABELS = ["Brand", "Model & Body Type", "Characteristics", "Quantity & Review"]
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -1013,7 +1013,9 @@ wizard_modal = html.Div(
 # Mirrors wizard_modal step for step (same cascading Brand -> Model & Body Type ->
 # Characteristics flow) so the two wizards behave identically. It stops one step
 # short since Customer and Price don't apply to vehicles that already exist, and
-# ends on a Review & Remove step showing a live count of matching vehicles instead.
+# ends on a Quantity & Review step: the quantity to remove is asked last, once
+# the full filter combination — and therefore the true maximum available — is
+# known, instead of asking for a number before the ceiling is even computed.
 
 remove_wizard_modal = html.Div(
     id="rwiz-modal",
@@ -1036,12 +1038,10 @@ remove_wizard_modal = html.Div(
                     "marginBottom": "16px",
                 }),
 
-                # Step 0 — Quantity & Brand
+                # Step 0 — Brand
                 html.Div(
                     id="rwiz-step-0",
                     children=[
-                        _wiz_field("Number of vehicles to remove", dcc.Input(
-                            id="rwiz-qty", type="number", min=1, step=1, value=10, style=NUMBER_INPUT_STYLE)),
                         _wiz_field("Brand", dcc.Dropdown(
                             id="rwiz-brand", options=[{"label": b, "value": b} for b in _brands_avail],
                             placeholder="Select a brand", clearable=False)),
@@ -1070,10 +1070,12 @@ remove_wizard_modal = html.Div(
                     ],
                 ),
 
-                # Step 3 — Review & Remove
+                # Step 3 — Quantity & Review
                 html.Div(
                     id="rwiz-step-3", style={"display": "none"},
                     children=[
+                        _wiz_field("Number of vehicles to remove", dcc.Input(
+                            id="rwiz-qty", type="number", min=1, step=1, style=NUMBER_INPUT_STYLE)),
                         html.Div("Summary", style={
                             "fontSize": "11px", "color": "#718096", "fontWeight": "700",
                             "textTransform": "uppercase", "letterSpacing": "0.04em", "margin": "0 0 8px",
@@ -2092,6 +2094,34 @@ def _rwiz_count(brand, model, bodytype, power, co2, _open,
     return f"{n:,} vehicle{'s' if n != 1 else ''} match this selection."
 
 
+@app.callback(
+    Output("rwiz-qty", "value", allow_duplicate=True),
+    Output("rwiz-qty", "max"),
+    Input("rwiz-brand", "value"),
+    Input("rwiz-model", "value"),
+    Input("rwiz-bodytype", "value"),
+    Input("rwiz-power", "value"),
+    Input("rwiz-co2", "value"),
+    State("f-country", "value"),
+    State("f-asset-status", "value"),
+    State("f-brand", "value"),
+    State("f-model", "value"),
+    State("f-bodytype", "value"),
+    State("cob-store", "data"),
+    prevent_initial_call=True,
+)
+def _rwiz_qty_bounds(brand, model, bodytype, power, co2,
+                      country, asset_status, brands_f, models_f, bodytypes_f, cob_store):
+    """The quantity field is only asked once the full filter combination is set —
+    it defaults to (and is capped at) the number of vehicles actually available for
+    that combination, so the user can never type more than what exists."""
+    if not brand:
+        return None, None
+    available = count_matching_for_removal(country, brands_f, models_f, bodytypes_f, asset_status, cob_store,
+                                            brand, model, bodytype, power, co2)
+    return (available, available) if available > 0 else (None, None)
+
+
 # =============================================================================
 # Callbacks — Remove Vehicles wizard: step visibility / navigation controller
 # =============================================================================
@@ -2165,7 +2195,7 @@ def _rwiz_controller(open_n, back_n, primary_n, cancel_n, step,
     removal_data = removal_data or []
 
     no_reset = (no_update, no_update)
-    RESET_VALUES = (10, None)
+    RESET_VALUES = (None, None)
 
     if "btn-open-remove-wizard" in trig:
         return ({**MODAL_OVERLAY_STYLE, "display": "flex"}, 0, no_update, "", *RESET_VALUES)
@@ -2178,9 +2208,8 @@ def _rwiz_controller(open_n, back_n, primary_n, cancel_n, step,
 
     if "rwiz-btn-primary" in trig:
         if step == 0:
-            if not qty or int(qty) <= 0 or not brand:
-                return (no_update, step, no_update,
-                         "Please enter a quantity greater than 0 and select a brand.", *no_reset)
+            if not brand:
+                return (no_update, step, no_update, "Please select a brand.", *no_reset)
             return (no_update, 1, no_update, "", *no_reset)
 
         if step == 1:
