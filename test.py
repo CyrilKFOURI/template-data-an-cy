@@ -1,2478 +1,3300 @@
 from __future__ import annotations
 
-import glob
-import json
-import os
+import re
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
+import plotly.express as px
 import plotly.graph_objects as go
-from dash import Dash, Input, Output, State, dcc, html, no_update, ALL, callback_context
-import dash
+from dash import ALL, MATCH, Dash, Input, Output, State, ctx, dcc, html, dash_table
+from dash.exceptions import PreventUpdate
 
-# =============================================================================
-# Config — adjust to your environment
-# =============================================================================
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_FOLDER = BASE_DIR / "data"
-MODELS_PATH = BASE_DIR / "models.parquet"
-LOGO_PATH   = BASE_DIR / "a.jpg"
-
-COUNTRIES_TO_READ: list[str] = ["SPAIN"]   # e.g. ["SPAIN", "ITALY", "FRANCE"]
-START_YYYYMM = "202301"
-END_YYYYMM   = "202512"
-
-COLUMNS_TO_READ = [
-    "COB_DATE", "ID_CONTRACT", "VEHICLE_ID", "ID_QUOTATION",
-    "COUNTRY", "NOVA_ASSET_STATUS", "BIKE_OR_CAR",
-    "CLASS_CATALOG", "BRAND_UPDATE", "VEHICLE_CLASS",
-    "POWER_CATEGORY", "FUEL_TYPE2", "FUEL_TYPE",
-    "FINAL_CONTRACT_DURATION", "VA_CO2_EMSS_REAL",
+APP_TITLE = "Arval NOVA Analytics Pro"
+MAX_PLOT_ROWS = 50_000
+MAX_TOP_CATEGORIES = 20
+MAX_CATEGORICAL_VALUES_FOR_SELECTOR = 100
+MAX_HEATMAP_LEVELS = 25
+MAX_HIGH_CARDINALITY = 100_000
+MAX_KPI_CHART_POINTS = 36
+MAX_CATEGORY_TREND = 10
+MAX_INTERACTION_CORR_COLS = 15
+DEFAULT_LOAD_SAMPLE_PCT = 100.0
+DEFAULT_SELECTED_LOAD_COLUMNS = [
+    "EXTENSION_DATE",
+    "CLASS_CATALOG",
+    "CONTRACT_START_DATE",
+    "CONTRACT_END_DATE",
+    "COB_DATE",
+    "DATE_OF_ORDER",
+    "CONTRACT_END_DATE_AMENDED",
+    "ID_CONTRACT",
+    "VEHICLE_ID",
+    "ID_QUOTATION",
+    "FINAL_CONTRACT_DURATION",
+    "POWER_CATEGORY",
+    "BIKE_OR_CAR",
+    "CLS_VEHICLE_TYPE",
+    "COUNTRY",
+    "BRAND_UPDATE",
+    "VEHICLE_CLASS",
+    "VEHICLE_MODEL",
+    "MODEL_CATALOG",
     "OEM_UPDATE",
-    # Synthetic fields (added by add_new_fields_to_parquets.py)
-    "GROUP_RATING", "COUNTERPARTY_RATING", "CLS_GROUP_RATING",
-    "ARVAL_INDUSTRY_CODE_CLS_DESCRIPTION", "SHARED_CLIENT_FLAG",
-    "VEHICLE_PRICE_EUR", "EXPOSURE_AMOUNT_LTR", "EXPOSURE_AMOUNT_MTR",
-    "OBLIGOR_IDENTIFIER",
-    # Temporary stand-ins backfilled by scripts/add_pending_orders_and_id_customer.py
-    "PENDING_ORDERS", "ID_CUSTOMER",
+    "NOVA_ASSET_STATUS",
+    "FUEL_TYPE2",
+    "FUEL_TYPE",
 ]
+DEFAULT_COUNTRIES = ["ITALY", "SPAIN", "BELGIUM", "FRANCE", "GERMANY", "LUXEMBOURG", "NETHERLANDS", "UNITED KINGDOM"]
+TIME_GRAINS = ["monthly", "quarterly", "yearly"]
+AGG_FUNCS = ["count", "sum", "mean", "median", "min", "max"]
+PLOT_TYPES = ["auto", "histogram", "box", "violin", "bar", "scatter", "heatmap", "line"]
+COB_TEMPORAL_COLUMNS = {"COB_YEAR", "COB_MONTH", "COB_QUARTER"}
+ADV_FILTER_ROWS = 3
+MAX_ADV_FILTER_ROWS = 12
+ADV_FILTER_LOGIC_OPTIONS = ["AND", "OR"]
+TEXT_FILTER_THRESHOLD = 100
+MONTH_OPTIONS = [{"label": f"{m:02d}", "value": m} for m in range(1, 13)]
+
+DATA_CACHE: dict[str, pd.DataFrame] = {}
+CATALOG_CACHE: pd.DataFrame | None = None
+
+
+@dataclass(frozen=True)
+class CatalogItem:
+    file_path: Path
+    country: str
+    yyyymm: str
+    period: pd.Timestamp
 
-UNIQUE_KEY_COLS = ["ID_CONTRACT", "VEHICLE_ID", "ID_QUOTATION"]
-
-# Columns expected/desired from models.parquet
-_MODELS_ENRICH_COLS = [
-    "BRAND_UPDATE", "MODEL",
-    "MARKET_MODEL", "MARKET_BODY_GROUP",
-    "CDN_CLF_SEGMENT", "CDN_CLF_BODY_TYPE",
-]
-
-PAGE_SIZE = 15
-
-
-# =============================================================================
-# Data loading — same filename convention as key_refactor
-# Filename pattern:  <prefix>-<COUNTRY>-<YYYYMM>.parquet
-# =============================================================================
-
-def load_country_monthly_data(
-    folder_path: Path | str,
-    countries: list[str],
-    start_yyyymm: str,
-    end_yyyymm: str,
-    cols: list[str] | None = None,
-) -> pd.DataFrame:
-    """
-    Reads parquet files whose names follow  *-<COUNTRY>-<YYYYMM>.parquet.
-    Country is decoded from parts[1], period from parts[2].
-    """
-    files = glob.glob(f"{folder_path}/*.parquet")
-    dfs: list[pd.DataFrame] = []
-
-    start_int = int(start_yyyymm)
-    end_int   = int(end_yyyymm)
-    countries_upper = {c.strip().upper() for c in countries}
-
-    for fp in files:
-        name  = os.path.basename(fp).replace(".parquet", "")
-        parts = [p.strip() for p in name.split("-")]
-        if len(parts) < 3:
-            continue
-        file_country = parts[1].upper()
-        try:
-            file_yyyymm = int(parts[2])
-        except ValueError:
-            continue
-        if file_country in countries_upper and start_int <= file_yyyymm <= end_int:
-            chunk = pd.read_parquet(fp, columns=cols)
-            dfs.append(chunk)
-
-    if not dfs:
-        return pd.DataFrame(columns=cols or COLUMNS_TO_READ)
-    return pd.concat(dfs, ignore_index=True)
-
-
-# =============================================================================
-# Models enrichment — same logic as key_refactor
-# =============================================================================
-
-def _load_models_df() -> pd.DataFrame:
-    path = str(MODELS_PATH)
-    if not os.path.exists(path):
-        return pd.DataFrame()
-    try:
-        import pyarrow.parquet as pq
-        schema_cols = pq.read_schema(path).names
-        cols_to_read = [c for c in _MODELS_ENRICH_COLS if c in schema_cols]
-        mdf = pd.read_parquet(path, columns=cols_to_read)
-        mdf["MODEL"]        = mdf["MODEL"].astype(str).str.strip()
-        mdf["BRAND_UPDATE"] = mdf["BRAND_UPDATE"].astype(str).str.strip()
-        return mdf.drop_duplicates(subset=["BRAND_UPDATE", "MODEL"])
-    except Exception:
-        return pd.DataFrame()
-
-
-MODELS_DF = _load_models_df()
-
-
-def enrich_with_models(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Extracts MODEL from CLASS_CATALOG (split on '/'), then left-joins models.parquet
-    to add MARKET_MODEL, MARKET_BODY_GROUP (and CDN columns if present).
-    """
-    enrich_cols = ["MARKET_MODEL", "MARKET_BODY_GROUP", "CDN_CLF_SEGMENT", "CDN_CLF_BODY_TYPE"]
-
-    if "CLASS_CATALOG" not in df.columns or "BRAND_UPDATE" not in df.columns:
-        return df
-
-    out = df.copy()
-    out["MODEL"]        = out["CLASS_CATALOG"].astype(str).str.split("/").str[0].str.strip()
-    out["BRAND_UPDATE"] = out["BRAND_UPDATE"].astype(str).str.strip()
-
-    if MODELS_DF.empty:
-        for c in enrich_cols:
-            if c not in out.columns:
-                out[c] = np.nan
-        return out
-
-    # Skip if already fully enriched
-    if all(c in out.columns and out[c].notna().any() for c in ["MARKET_MODEL", "MARKET_BODY_GROUP"]):
-        return out
-
-    out = out.drop(columns=[c for c in enrich_cols if c in out.columns], errors="ignore")
-    merge_cols = [c for c in _MODELS_ENRICH_COLS if c in MODELS_DF.columns]
-    out = out.merge(MODELS_DF[merge_cols], how="left", on=["BRAND_UPDATE", "MODEL"])
-    return out
-
-
-# =============================================================================
-# Data preparation
-# =============================================================================
-
-def prepare_dataset(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df
-    if "COB_DATE" in df.columns:
-        df["COB_DATE"] = pd.to_datetime(df["COB_DATE"], errors="coerce")
-    df["YEAR"]  = df["COB_DATE"].dt.year
-    df["MONTH"] = df["COB_DATE"].dt.month
-    for col in ["COUNTRY", "NOVA_ASSET_STATUS", "BIKE_OR_CAR", "BRAND_UPDATE"]:
-        if col in df.columns:
-            df[col] = df[col].astype(str).str.strip()
-    # CO2_BUCKET — same bucketing as notebook ([0-9], [10-19], ...)
-    if "VA_CO2_EMSS_REAL" in df.columns:
-        def _co2_bucket(v):
-            try:
-                n = int(float(v)); lo = (n // 10) * 10
-                return f"[{lo}-{lo+9}]"
-            except Exception:
-                return "UNK"
-        df["CO2_BUCKET"] = df["VA_CO2_EMSS_REAL"].apply(_co2_bucket)
-    # EXPOSURE_AMOUNT_TOT
-    if "EXPOSURE_AMOUNT_LTR" in df.columns and "EXPOSURE_AMOUNT_MTR" in df.columns:
-        df["EXPOSURE_AMOUNT_TOT"] = df["EXPOSURE_AMOUNT_LTR"].fillna(0) + df["EXPOSURE_AMOUNT_MTR"].fillna(0)
-    return df
-
-
-def prepare_uc1(df: pd.DataFrame) -> pd.DataFrame:
-    """Filter to CAR (any NOVA_ASSET_STATUS — that's a live dashboard filter now),
-    enrich with market model/body type."""
-    if df.empty:
-        return df
-    d = df[df["BIKE_OR_CAR"] == "CAR"].copy()
-    d = enrich_with_models(d)
-    return d
-
-
-# =============================================================================
-# Startup: load + prepare
-# =============================================================================
-
-_raw = load_country_monthly_data(
-    DATA_FOLDER, COUNTRIES_TO_READ, START_YYYYMM, END_YYYYMM,
-    cols=[c for c in COLUMNS_TO_READ if c],
-)
-_raw = prepare_dataset(_raw)
-UC1_DF = prepare_uc1(_raw)
-
-# Pre-compute filter option lists (used to populate dropdowns at layout time)
-_countries_avail  = sorted(UC1_DF["COUNTRY"].dropna().unique().tolist()) if not UC1_DF.empty else []
-_brands_avail     = sorted(UC1_DF["BRAND_UPDATE"].dropna().unique().tolist()) if not UC1_DF.empty else []
-_models_avail     = sorted(UC1_DF["MARKET_MODEL"].dropna().unique().tolist()) if "MARKET_MODEL" in UC1_DF.columns and not UC1_DF.empty else []
-_btypes_avail     = sorted(UC1_DF["MARKET_BODY_GROUP"].dropna().unique().tolist()) if "MARKET_BODY_GROUP" in UC1_DF.columns and not UC1_DF.empty else []
-_asset_statuses_avail = sorted(UC1_DF["NOVA_ASSET_STATUS"].dropna().unique().tolist()) if not UC1_DF.empty else []
-
-# COB period lists for the global time filter
-_cob_monthly_vals   = sorted(UC1_DF["COB_DATE"].dropna().dt.to_period("M").astype(str).unique().tolist()) if not UC1_DF.empty else []
-_cob_quarterly_vals = sorted(set(
-    f"{p[:4]}-Q{(int(p[5:7]) - 1) // 3 + 1}" for p in _cob_monthly_vals
-))
-_cob_yearly_vals    = sorted(set(p[:4] for p in _cob_monthly_vals))
-_default_cob_period = _cob_monthly_vals[-1] if _cob_monthly_vals else None
-
-
-# =============================================================================
-# Heatmap axis / metric options
-# =============================================================================
-
-# Every categorical dimension is available on both axes — user picks freely,
-# mutual exclusion (can't pick the same field on X and Y) is enforced by callback.
-ALL_AXIS_OPTIONS = [
-    {"label": "Brand",                      "value": "BRAND_UPDATE"},
-    {"label": "Power Category",             "value": "POWER_CATEGORY"},
-    {"label": "CO2 Bucket",                 "value": "CO2_BUCKET"},
-    {"label": "Industry Type",              "value": "ARVAL_INDUSTRY_CODE_CLS_DESCRIPTION"},
-    {"label": "Group Rating",               "value": "GROUP_RATING"},
-    {"label": "Counterparty Rating",        "value": "COUNTERPARTY_RATING"},
-    {"label": "CLS Group Rating",           "value": "CLS_GROUP_RATING"},
-]
-Y_OPTIONS = ALL_AXIS_OPTIONS
-X_OPTIONS = ALL_AXIS_OPTIONS
-
-METRIC_OPTIONS = [
-    {"label": "Volume (Contracts)",         "value": "volume"},
-    {"label": "Exposure",                   "value": "exposure"},
-    {"label": "Vehicle Price",              "value": "intensite_risk_asset"},
-]
-
-ASSET_STATUS_OPTIONS = [{"label": "ALL", "value": "ALL"}] + [
-    {"label": s, "value": s} for s in _asset_statuses_avail
-]
-
-
-# =============================================================================
-# Core helpers: filter → COB filter → pivot → figure
-# =============================================================================
-
-def apply_filters(country, brands, models, bodytypes, asset_status=None) -> pd.DataFrame:
-    d = UC1_DF.copy()
-    if country and country != "ALL" and "COUNTRY" in d.columns:
-        d = d[d["COUNTRY"] == country]
-    if brands:
-        d = d[d["BRAND_UPDATE"].isin(brands)]
-    if models and "MARKET_MODEL" in d.columns:
-        d = d[d["MARKET_MODEL"].isin(models)]
-    if bodytypes and "MARKET_BODY_GROUP" in d.columns:
-        d = d[d["MARKET_BODY_GROUP"].isin(bodytypes)]
-    if asset_status and asset_status != "ALL" and "NOVA_ASSET_STATUS" in d.columns:
-        d = d[d["NOVA_ASSET_STATUS"] == asset_status]
-    return d
-
-
-def apply_cob_filter(d: pd.DataFrame, granularity: str, period: str) -> pd.DataFrame:
-    if not period or "COB_DATE" not in d.columns:
-        return d
-    if granularity == "monthly":
-        return d[d["COB_DATE"].dt.to_period("M").astype(str) == period]
-    if granularity == "quarterly":
-        year_s, q_s = period.split("-Q")
-        months = {1: [1,2,3], 2: [4,5,6], 3: [7,8,9], 4: [10,11,12]}[int(q_s)]
-        return d[(d["COB_DATE"].dt.year == int(year_s)) & (d["COB_DATE"].dt.month.isin(months))]
-    if granularity == "yearly":
-        return d[d["COB_DATE"].dt.year == int(period)]
-    return d
-
-
-def compute_row_exposure(d: pd.DataFrame) -> pd.Series:
-    return d["EXPOSURE_AMOUNT_LTR"].fillna(0) + d["PENDING_ORDERS"].fillna(0)
-
-
-def _fill_rating_na(d: pd.DataFrame, *cols: str) -> pd.DataFrame:
-    """Missing GROUP_RATING/COUNTERPARTY_RATING/CLS_GROUP_RATING become the literal
-    "NR" category instead of being dropped, so unrated contracts still show up on
-    the heatmap instead of just vanishing from the axis."""
-    d = d.copy()
-    for c in cols:
-        if c in RATING_FILL_FIELDS and c in d.columns:
-            d[c] = d[c].fillna(RATING_NR_LABEL)
-    return d
-
-
-def build_exposure_pivot(d: pd.DataFrame, y_col: str, x_col: str, aggregation: str = "sum") -> pd.DataFrame:
-    needed = {y_col, x_col, "ID_CUSTOMER", "EXPOSURE_AMOUNT_LTR", "PENDING_ORDERS", "COB_DATE"}
-    cols = [c for c in needed if c in d.columns]
-    d = _fill_rating_na(d[cols], y_col, x_col).dropna(subset=[y_col, x_col])
-    if d.empty or "ID_CUSTOMER" not in d.columns:
-        return pd.DataFrame()
-
-    d["EXPOSURE"] = compute_row_exposure(d)
-
-    if "COB_DATE" in d.columns:
-        d = d.sort_values("COB_DATE")
-    d = d.drop_duplicates(subset=[y_col, x_col, "ID_CUSTOMER"], keep="last")
-
-    agg = "mean" if aggregation == "mean" else "sum"
-    return d.groupby([y_col, x_col])["EXPOSURE"].agg(agg).unstack(x_col, fill_value=0)
-
-
-def build_pivot(d: pd.DataFrame, y_col: str, x_col: str, metric: str, aggregation: str = "sum") -> pd.DataFrame:
-    if metric == "exposure":
-        return _apply_rating_order(build_exposure_pivot(d, y_col, x_col, aggregation), y_col, x_col)
-
-    keep = list({y_col, x_col} | {c for c in UNIQUE_KEY_COLS if c in d.columns} | {"COB_DATE", "VEHICLE_PRICE_EUR"} & set(d.columns))
-    d = _fill_rating_na(d[[c for c in keep if c in d.columns]], y_col, x_col).dropna(subset=[y_col, x_col])
-    if d.empty:
-        return pd.DataFrame()
-
-    # Dedup: latest COB snapshot per unique contract key
-    keys = [k for k in UNIQUE_KEY_COLS if k in d.columns]
-    if keys:
-        if "COB_DATE" in d.columns:
-            d = d.sort_values("COB_DATE")
-        d = d.drop_duplicates(subset=keys, keep="last")
-
-    if metric == "intensite_risk_asset" and "VEHICLE_PRICE_EUR" in d.columns:
-        piv = d.groupby([y_col, x_col])["VEHICLE_PRICE_EUR"].sum().unstack(x_col, fill_value=0)
-    else:  # "volume" or fallback
-        piv = d.groupby([y_col, x_col]).size().unstack(x_col, fill_value=0)
-
-    return _apply_rating_order(piv, y_col, x_col)
-
-
-def compute_total_exposure(d: pd.DataFrame, aggregation: str = "sum") -> float:
-    if d.empty or "ID_CUSTOMER" not in d.columns:
-        return 0.0
-    dd = d.copy()
-    dd["EXPOSURE"] = compute_row_exposure(dd)
-    if "COB_DATE" in dd.columns:
-        dd = dd.sort_values("COB_DATE")
-    dd = dd.drop_duplicates(subset=["ID_CUSTOMER"], keep="last")
-    return float(dd["EXPOSURE"].sum()) if aggregation != "mean" else float(dd["EXPOSURE"].mean())
-
-
-def compute_total_metric(d: pd.DataFrame, metric: str, aggregation: str = "sum") -> float:
-    if metric == "exposure":
-        return compute_total_exposure(d, aggregation)
-    keys = [k for k in UNIQUE_KEY_COLS if k in d.columns]
-    dd = d.copy()
-    if keys:
-        if "COB_DATE" in dd.columns:
-            dd = dd.sort_values("COB_DATE")
-        dd = dd.drop_duplicates(subset=keys, keep="last")
-    if metric == "intensite_risk_asset" and "VEHICLE_PRICE_EUR" in dd.columns:
-        return float(dd["VEHICLE_PRICE_EUR"].sum())
-    return float(len(dd))
-
-
-def format_millions(value: float) -> str:
-    s = f"{value / 1_000_000:.4f}".rstrip("0").rstrip(".")
-    return s if s else "0"
-
-
-def make_heatmap_fig(
-    piv: pd.DataFrame, title: str, colorscale: str = "Blues",
-    page: int = 0, zmid=None, zmin=None, zmax=None, show_totals: bool = False,
-) -> go.Figure:
-    if piv.empty:
-        fig = go.Figure()
-        fig.add_annotation(text="No data", showarrow=False, font={"size": 14, "color": "#aaa"})
-        fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", height=220)
-        return fig
-
-    paged = piv.iloc[page * PAGE_SIZE: (page + 1) * PAGE_SIZE]
-    z = paged.values.astype(float)
-    x_lbl = [str(c) for c in paged.columns]
-    y_lbl = [str(r) for r in paged.index]
-
-    text = [[_fmt_val(v) for v in row] for row in z]
-
-    if show_totals and not paged.empty:
-        row_totals = paged.sum(axis=1).values
-        col_totals = piv.reindex(columns=paged.columns).sum(axis=0).values
-        grand_total = float(piv.values.sum())
-
-        z = np.hstack([z, np.full((z.shape[0], 1), np.nan)])
-        for i, v in enumerate(row_totals):
-            text[i] = text[i] + [_fmt_val(v)]
-        x_lbl = x_lbl + ["Total"]
-
-        # Prepended (not appended) — Plotly's categorical y-axis renders the last
-        # array entry at the top, so putting "Total" first here puts it at the
-        # bottom of the chart, matching a conventional totals row.
-        z = np.vstack([np.full((1, z.shape[1]), np.nan), z])
-        text = [[_fmt_val(v) for v in col_totals] + [_fmt_val(grand_total)]] + text
-        y_lbl = ["Total"] + y_lbl
-
-    hm_kwargs: dict = dict(
-        z=z.tolist(), x=x_lbl, y=y_lbl,
-        text=text, texttemplate="%{text}",
-        colorscale=colorscale, hoverongaps=False,
-        hovertemplate="%{y} × %{x}: %{z}<extra></extra>",
-    )
-    if zmid is not None: hm_kwargs["zmid"] = zmid
-    if zmin  is not None: hm_kwargs["zmin"] = zmin
-    if zmax  is not None: hm_kwargs["zmax"] = zmax
-
-    fig = go.Figure(go.Heatmap(**hm_kwargs))
-    fig.update_layout(
-        title={"text": title, "font": {"size": 13, "color": "#1a1a2e"}, "x": 0.01},
-        margin={"l": 10, "r": 10, "t": 50, "b": 85},
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        font={"family": "Inter, sans-serif", "size": 11},
-        height=max(300, 60 + 28 * len(y_lbl)),
-        xaxis={"tickangle": -40, "tickfont": {"size": 10}},
-        yaxis={"tickfont": {"size": 10}},
-    )
-    return fig
-
-
-# =============================================================================
-# Simulation domain helpers — obligor "customers", brand/model maps, templates
-# =============================================================================
-
-RATING_ORDER_FIELDS = {"GROUP_RATING", "COUNTERPARTY_RATING"}
-CLS_RATING_FIELD = "CLS_GROUP_RATING"
-RATING_FILL_FIELDS = RATING_ORDER_FIELDS | {CLS_RATING_FIELD}
-RATING_NR_LABEL = "NR"
-
-
-def _rating_sort_key(value) -> tuple:
-    """Sort key for GROUP_RATING/COUNTERPARTY_RATING grades, parsed algorithmically
-    (numeric grade, then -/plain/+ sub-order: e.g. "2-" < "2" < "2+") instead of a
-    fixed list, so it keeps working for any grade the data has (1 up to 12+ ...).
-    Missing/blank ratings ("NR") always sort first."""
-    v = str(value).strip().upper()
-    if v in ("", RATING_NR_LABEL, "NAN", "NONE"):
-        return (-1, 0)
-    suffix_rank, core = 1, v
-    if v.endswith("+"):
-        suffix_rank, core = 2, v[:-1]
-    elif v.endswith("-"):
-        suffix_rank, core = 0, v[:-1]
-    try:
-        grade = int(core)
-    except ValueError:
-        return (10 ** 6, 0)
-    return (grade, suffix_rank)
-
-
-def _cls_axis_sort_key(value) -> tuple:
-    """Sort key for CLS_GROUP_RATING on a heatmap axis: numeric grade order, with
-    missing/blank ratings ("NR") always sorting first — same convention as
-    _rating_sort_key, just for CLS's plain numeric scale instead of the
-    grade+suffix scale used by GROUP_RATING/COUNTERPARTY_RATING."""
-    v = str(value).strip().upper()
-    if v in ("", RATING_NR_LABEL, "NAN", "NONE"):
-        return (-1, 0.0)
-    try:
-        return (0, float(value))
-    except (TypeError, ValueError):
-        return (1, 0.0)
-
-
-def _ordered_axis(values, col: str, is_y: bool = False) -> list:
-    """Order axis category values: rating grade order for rating fields (reversed
-    on the y-axis, since Plotly renders a heatmap's last y entry at the top and
-    the first at the bottom — opposite of the x-axis), plain sort otherwise.
-    Used both to reorder a single pivot's axis and to build the union index/columns
-    when aligning two pivots (e.g. Original vs Simulated) — any reindex done after
-    this must reuse it instead of a plain sorted(), or the rating order is lost."""
-    if col in RATING_ORDER_FIELDS:
-        ordered = sorted(values, key=_rating_sort_key)
-        return list(reversed(ordered)) if is_y else ordered
-    if col == CLS_RATING_FIELD:
-        ordered = sorted(values, key=_cls_axis_sort_key)
-        return list(reversed(ordered)) if is_y else ordered
-    return sorted(values)
-
-
-def _apply_rating_order(piv: pd.DataFrame, y_col: str, x_col: str) -> pd.DataFrame:
-    if piv.empty:
-        return piv
-    if y_col in RATING_FILL_FIELDS:
-        piv = piv.reindex(index=_ordered_axis(piv.index.tolist(), y_col, is_y=True))
-    if x_col in RATING_FILL_FIELDS:
-        piv = piv.reindex(columns=_ordered_axis(piv.columns.tolist(), x_col, is_y=False))
-    return piv
-
-
-def _co2_bucket_low(bucket: str) -> int:
-    try:
-        return int(str(bucket).split("-")[0].strip("[]"))
-    except Exception:
-        return 10 ** 9
-
-
-def co2_bucket_midpoint(bucket: str) -> float:
-    try:
-        lo, hi = str(bucket).strip("[]").split("-")
-        return (int(lo) + int(hi)) / 2
-    except Exception:
-        return float("nan")
-
-
-def _mode_or(series: pd.Series, default=""):
-    s = series.dropna()
-    if s.empty:
-        return default
-    m = s.mode()
-    return m.iloc[0] if not m.empty else default
-
-
-def _cls_rating_label(r) -> str:
-    """CLS_GROUP_RATING is numeric on most datasets (1-11) but some snapshots store
-    it as a non-numeric string — fall back to the raw value instead of crashing."""
-    try:
-        f = float(r)
-        return str(int(f)) if f.is_integer() else str(f)
-    except (TypeError, ValueError):
-        return str(r)
-
-
-# One row per OBLIGOR_IDENTIFIER ("customer") — latest known value per field —
-# backs the "existing customer" search in the Add Vehicles wizard.
-if not UC1_DF.empty and "OBLIGOR_IDENTIFIER" in UC1_DF.columns:
-    _ob_cols = [c for c in [
-        "OBLIGOR_IDENTIFIER", "COB_DATE", "COUNTRY", "GROUP_RATING",
-        "COUNTERPARTY_RATING", "CLS_GROUP_RATING",
-        "ARVAL_INDUSTRY_CODE_CLS_DESCRIPTION", "SHARED_CLIENT_FLAG",
-    ] if c in UC1_DF.columns]
-    _ob_src = UC1_DF[_ob_cols].dropna(subset=["OBLIGOR_IDENTIFIER"]).sort_values("COB_DATE")
-    _ob_fill_cols = [c for c in [
-        "COUNTRY", "GROUP_RATING", "COUNTERPARTY_RATING", "CLS_GROUP_RATING",
-        "ARVAL_INDUSTRY_CODE_CLS_DESCRIPTION", "SHARED_CLIENT_FLAG",
-    ] if c in _ob_src.columns]
-    # Each field carries forward the customer's latest *non-null* value across
-    # snapshots. Ratings are populated independently per row in this synthetic
-    # dataset, so the very last snapshot alone can be blank even when an earlier
-    # period for the same customer has a known rating — without this, picking
-    # "existing customer" in the Add Vehicles wizard would sometimes add vehicles
-    # with a blank rating instead of that customer's real one.
-    _ob_src[_ob_fill_cols] = _ob_src.groupby("OBLIGOR_IDENTIFIER")[_ob_fill_cols].ffill()
-    OBLIGOR_PROFILES = (
-        _ob_src.drop_duplicates(subset=["OBLIGOR_IDENTIFIER"], keep="last")
-        .set_index("OBLIGOR_IDENTIFIER")
-    )
-else:
-    OBLIGOR_PROFILES = pd.DataFrame()
-
-# Brand -> models / body types actually present in the data (cascading dropdowns)
-BRAND_MODEL_MAP: dict[str, list[str]] = {}
-BRAND_BODYTYPE_MAP: dict[str, list[str]] = {}
-if not UC1_DF.empty and "MARKET_MODEL" in UC1_DF.columns:
-    for _b, _grp in UC1_DF.dropna(subset=["MARKET_MODEL"]).groupby("BRAND_UPDATE"):
-        BRAND_MODEL_MAP[_b] = sorted(_grp["MARKET_MODEL"].dropna().unique().tolist())
-if not UC1_DF.empty and "MARKET_BODY_GROUP" in UC1_DF.columns:
-    for _b, _grp in UC1_DF.dropna(subset=["MARKET_BODY_GROUP"]).groupby("BRAND_UPDATE"):
-        BRAND_BODYTYPE_MAP[_b] = sorted(_grp["MARKET_BODY_GROUP"].dropna().unique().tolist())
-
-# Reverse lookup — market model -> brands that have it (used to auto-select the
-# Brand filter when a Market Model is picked in the Filters panel)
-MODEL_BRAND_MAP: dict[str, list[str]] = {}
-if not UC1_DF.empty and "MARKET_MODEL" in UC1_DF.columns:
-    for _m, _grp in UC1_DF.dropna(subset=["MARKET_MODEL"]).groupby("MARKET_MODEL"):
-        MODEL_BRAND_MAP[_m] = sorted(_grp["BRAND_UPDATE"].dropna().unique().tolist())
-
-_TEMPLATE_COLS = ["FUEL_TYPE", "FUEL_TYPE2", "VEHICLE_CLASS", "OEM_UPDATE",
-                   "FINAL_CONTRACT_DURATION", "CDN_CLF_SEGMENT", "CDN_CLF_BODY_TYPE"]
-
-
-def get_brand_model_template(brand: str, model: str | None) -> dict:
-    """Most-frequent (mode) value of incidental, non-risk columns for this brand/model.
-    These columns are never used as a heatmap axis or metric, so filling them
-    deterministically (not randomly) just keeps the synthetic row schema-complete."""
-    sub = UC1_DF[UC1_DF["BRAND_UPDATE"] == brand]
-    if model and "MARKET_MODEL" in UC1_DF.columns:
-        model_sub = sub[sub["MARKET_MODEL"] == model]
-        if len(model_sub) >= 3:
-            sub = model_sub
-    out = {}
-    for c in _TEMPLATE_COLS:
-        if c in sub.columns:
-            fallback = _mode_or(UC1_DF[c]) if c in UC1_DF.columns else ""
-            out[c] = _mode_or(sub[c], default=fallback)
-        else:
-            out[c] = ""
-    return out
-
-
-def median_price_for(brand: str, model: str | None) -> float:
-    if UC1_DF.empty or "VEHICLE_PRICE_EUR" not in UC1_DF.columns:
-        return 20000.0
-    sub = UC1_DF[UC1_DF["BRAND_UPDATE"] == brand]
-    if model and "MARKET_MODEL" in UC1_DF.columns:
-        model_sub = sub[sub["MARKET_MODEL"] == model]
-        if len(model_sub) >= 3:
-            sub = model_sub
-    prices = sub["VEHICLE_PRICE_EUR"].dropna()
-    if prices.empty:
-        prices = UC1_DF["VEHICLE_PRICE_EUR"].dropna()
-    return float(prices.median()) if not prices.empty else 20000.0
-
-
-# Canonical dropdown option lists, sourced from real data (not hardcoded)
-INDUSTRY_OPTIONS = (
-    sorted(UC1_DF["ARVAL_INDUSTRY_CODE_CLS_DESCRIPTION"].dropna().unique().tolist())
-    if "ARVAL_INDUSTRY_CODE_CLS_DESCRIPTION" in UC1_DF.columns and not UC1_DF.empty else []
-)
-SHARED_FLAG_OPTIONS = (
-    sorted(UC1_DF["SHARED_CLIENT_FLAG"].dropna().unique().tolist())
-    if "SHARED_CLIENT_FLAG" in UC1_DF.columns and not UC1_DF.empty else []
-)
-GROUP_RATING_OPTIONS = (
-    sorted(UC1_DF["GROUP_RATING"].dropna().unique().tolist(), key=_rating_sort_key)
-    if "GROUP_RATING" in UC1_DF.columns and not UC1_DF.empty else []
-)
-COUNTERPARTY_RATING_OPTIONS = (
-    sorted(UC1_DF["COUNTERPARTY_RATING"].dropna().unique().tolist(), key=_rating_sort_key)
-    if "COUNTERPARTY_RATING" in UC1_DF.columns and not UC1_DF.empty else []
-)
-def _cls_sort_key(r):
-    try:
-        return (0, float(r))
-    except (TypeError, ValueError):
-        return (1, str(r))
-
-
-CLS_RATING_OPTIONS = (
-    sorted(UC1_DF["CLS_GROUP_RATING"].dropna().unique().tolist(), key=_cls_sort_key)
-    if "CLS_GROUP_RATING" in UC1_DF.columns and not UC1_DF.empty else []
-)
-POWER_CATEGORY_OPTIONS = (
-    sorted(UC1_DF["POWER_CATEGORY"].dropna().unique().tolist())
-    if "POWER_CATEGORY" in UC1_DF.columns and not UC1_DF.empty else []
-)
-CO2_BUCKET_OPTIONS = (
-    sorted(UC1_DF["CO2_BUCKET"].dropna().unique().tolist(), key=_co2_bucket_low)
-    if "CO2_BUCKET" in UC1_DF.columns and not UC1_DF.empty else []
-)
-
-_NEW_OBLIGOR_COUNTER = {"n": 0}
-
-
-def resolve_cob_date(cob_store: dict) -> pd.Timestamp:
-    """A concrete date inside the currently selected COB period, so newly added
-    vehicles actually show up when the simulation is run under that period."""
-    cob = cob_store or {}
-    gran = cob.get("granularity", "monthly")
-    period = cob.get("period") or _default_cob_period
-    try:
-        if gran == "monthly" and period:
-            return pd.Period(period, freq="M").end_time.normalize()
-        if gran == "quarterly" and period:
-            year_s, q_s = period.split("-Q")
-            month = {1: 3, 2: 6, 3: 9, 4: 12}[int(q_s)]
-            return (pd.Timestamp(year=int(year_s), month=month, day=1) + pd.offsets.MonthEnd(0)).normalize()
-        if gran == "yearly" and period:
-            return pd.Timestamp(year=int(period), month=12, day=31)
-    except Exception:
-        pass
-    return pd.Timestamp.now().normalize()
-
-
-def _narrow_by_removal_filters(d: pd.DataFrame, brand, model=None, bodytype=None, power=None, co2=None) -> pd.DataFrame:
-    """Apply the same brand / model / body type / power category / CO2 bucket
-    filters used by the Add Vehicles wizard, but to narrow an existing population
-    instead of specifying a new one. Only fields that are actually set constrain
-    the result, so this works the same whether the user has picked one field or
-    all of them."""
-    out = d
-    if brand and "BRAND_UPDATE" in out.columns:
-        out = out[out["BRAND_UPDATE"] == brand]
-    if model and "MARKET_MODEL" in out.columns:
-        out = out[out["MARKET_MODEL"] == model]
-    if bodytype and "MARKET_BODY_GROUP" in out.columns:
-        out = out[out["MARKET_BODY_GROUP"] == bodytype]
-    if power and "POWER_CATEGORY" in out.columns:
-        out = out[out["POWER_CATEGORY"] == power]
-    if co2 and "CO2_BUCKET" in out.columns:
-        out = out[out["CO2_BUCKET"] == co2]
-    return out
-
-
-def _rwiz_scoped_df(country, brands_f, models_f, bodytypes_f, asset_status, cob_store,
-                     brand=None, model=None, bodytype=None, power=None, co2=None) -> pd.DataFrame:
-    """Dashboard-filtered, COB-filtered, contract-deduped vehicles narrowed by
-    whichever Remove Vehicles wizard fields are already picked. Shared by the
-    live counter and by each step's option list, so a dropdown never offers a
-    choice that would leave zero matching vehicles."""
-    cob = cob_store or {}
-    d = apply_filters(country, brands_f, models_f, bodytypes_f, asset_status)
-    d = apply_cob_filter(d, cob.get("granularity", "monthly"), cob.get("period") or "")
-    keys = [k for k in UNIQUE_KEY_COLS if k in d.columns]
-    if keys:
-        if "COB_DATE" in d.columns:
-            d = d.sort_values("COB_DATE")
-        d = d.drop_duplicates(subset=keys, keep="last")
-    return _narrow_by_removal_filters(d, brand, model, bodytype, power, co2)
-
-
-def count_matching_for_removal(country, brands_f, models_f, bodytypes_f, asset_status, cob_store,
-                                brand, model=None, bodytype=None, power=None, co2=None) -> int:
-    """Number of distinct vehicles (same contract-key dedup as the rest of the tool)
-    that match the current dashboard filters plus the Remove Vehicles wizard's own
-    brand/model/body type/power/CO2 picks. Drives the live counter shown throughout
-    the wizard."""
-    d = _rwiz_scoped_df(country, brands_f, models_f, bodytypes_f, asset_status, cob_store,
-                         brand, model, bodytype, power, co2)
-    return int(len(d))
-
-
-_RWIZ_FIELD_CHAIN = ["BRAND_UPDATE", "MARKET_MODEL", "MARKET_BODY_GROUP", "POWER_CATEGORY", "CO2_BUCKET"]
-
-
-def _rwiz_valid_options(d: pd.DataFrame, field: str, remaining_fields: list[str]) -> list:
-    """Values of `field` worth offering in a Remove Vehicles wizard dropdown: not
-    just values with a matching vehicle, but values for which at least one vehicle
-    also has every field still to come (`remaining_fields`) populated. Without this,
-    a field could show a value whose only matching vehicles are missing one of the
-    later fields, dead-ending the wizard on an empty next dropdown instead of a
-    genuine "0 vehicles" message."""
-    if field not in d.columns:
-        return []
-    needed = [field] + [f for f in remaining_fields if f in d.columns]
-    valid = d.dropna(subset=needed)
-    return sorted(valid[field].dropna().unique().tolist())
-
-
-def apply_removal_batches(d: pd.DataFrame, removal_entries: list[dict]) -> pd.DataFrame:
-    """Remove N rows per queued removal spec, matched on the exact same brand / model
-    / body type / power category / CO2 bucket combination the Remove Vehicles wizard
-    used to build that spec — the removal counterpart of build_synthetic_vehicles.
-    Rows are picked arbitrarily among the matching set; nothing about the filters or
-    metrics themselves is randomised."""
-    rng = np.random.default_rng(42)
-    out = d.copy()
-    for entry in removal_entries:
-        n = int(entry.get("qty") or 0)
-        if n <= 0:
-            continue
-        matching = _narrow_by_removal_filters(
-            out, entry.get("brand"), entry.get("model"), entry.get("body_type"),
-            entry.get("power_category"), entry.get("co2_bucket"),
-        )
-        idx = matching.index.tolist()
-        if idx:
-            drop_idx = rng.choice(idx, size=min(n, len(idx)), replace=False)
-            out = out.drop(index=drop_idx)
-    return out
-
-
-def build_synthetic_vehicles(batch: dict, cob_date: pd.Timestamp, start_id: int) -> pd.DataFrame:
-    """Expand one queued batch entry into `qty` fully-populated rows, matching the
-    real dataset schema so they aggregate identically to real vehicles in any pivot."""
-    qty = int(batch["qty"])
-    brand = batch["brand"]
-    model = batch.get("model")
-    body_type = batch.get("body_type")
-    tmpl = get_brand_model_template(brand, model)
-
-    co2_mid = co2_bucket_midpoint(batch["co2_bucket"])
-    ltr = float(batch.get("exposure_ltr") or 0.0)
-    mtr = float(batch.get("exposure_mtr") or 0.0)
-    ids = list(range(start_id, start_id + qty))
-
-    rows = {
-        "ID_CONTRACT": ids,
-        "VEHICLE_ID": ids,
-        "ID_QUOTATION": ids,
-        "COB_DATE": [cob_date] * qty,
-        "COUNTRY": [batch.get("country")] * qty,
-        "NOVA_ASSET_STATUS": ["IN FLEET"] * qty,
-        "BIKE_OR_CAR": ["CAR"] * qty,
-        "BRAND_UPDATE": [brand] * qty,
-        "MODEL": [model] * qty,
-        "MARKET_MODEL": [model] * qty,
-        "MARKET_BODY_GROUP": [body_type] * qty,
-        "CLASS_CATALOG": [f"{model}/{model}"] * qty,
-        "POWER_CATEGORY": [batch["power_category"]] * qty,
-        "CO2_BUCKET": [batch["co2_bucket"]] * qty,
-        "VA_CO2_EMSS_REAL": [co2_mid] * qty,
-        "OBLIGOR_IDENTIFIER": [batch.get("obligor_id")] * qty,
-        "ID_CUSTOMER": [batch.get("obligor_id")] * qty,
-        "GROUP_RATING": [batch.get("group_rating")] * qty,
-        "COUNTERPARTY_RATING": [batch.get("counterparty_rating")] * qty,
-        "CLS_GROUP_RATING": [batch.get("cls_rating")] * qty,
-        "ARVAL_INDUSTRY_CODE_CLS_DESCRIPTION": [batch.get("industry")] * qty,
-        "SHARED_CLIENT_FLAG": [batch.get("shared_flag")] * qty,
-        "VEHICLE_PRICE_EUR": [float(batch["price"])] * qty,
-        "EXPOSURE_AMOUNT_LTR": [ltr] * qty,
-        "EXPOSURE_AMOUNT_MTR": [mtr] * qty,
-        "EXPOSURE_AMOUNT_TOT": [ltr + mtr] * qty,
-        "PENDING_ORDERS": [mtr] * qty,
-        "FUEL_TYPE": [tmpl["FUEL_TYPE"]] * qty,
-        "FUEL_TYPE2": [tmpl["FUEL_TYPE2"]] * qty,
-        "VEHICLE_CLASS": [tmpl["VEHICLE_CLASS"]] * qty,
-        "OEM_UPDATE": [tmpl["OEM_UPDATE"]] * qty,
-        "FINAL_CONTRACT_DURATION": [tmpl["FINAL_CONTRACT_DURATION"]] * qty,
-        "CDN_CLF_SEGMENT": [tmpl["CDN_CLF_SEGMENT"]] * qty,
-        "CDN_CLF_BODY_TYPE": [tmpl["CDN_CLF_BODY_TYPE"]] * qty,
-    }
-    df = pd.DataFrame(rows)
-    df["COB_DATE"] = pd.to_datetime(df["COB_DATE"])
-    df["YEAR"]  = df["COB_DATE"].dt.year
-    df["MONTH"] = df["COB_DATE"].dt.month
-    return df
-
-
-# =============================================================================
-# Dash app
-# =============================================================================
 
 app = Dash(
     __name__,
+    title=APP_TITLE,
     suppress_callback_exceptions=True,
-    assets_folder=str(BASE_DIR / "fleet_assets"),
+    assets_folder=str(BASE_DIR / "assets"),
 )
-app.title = "Use Case 1 — Portfolio Heatmap"
+server = app.server
 
 
-# ── Style tokens ─────────────────────────────────────────────────────────────
-
-MODAL_OVERLAY_STYLE = {
-    "display": "none", "position": "fixed", "top": "0", "left": "0",
-    "width": "100%", "height": "100%", "backgroundColor": "rgba(15, 23, 42, 0.55)",
-    "zIndex": "9999", "justifyContent": "center", "alignItems": "center",
-}
-MODAL_PANEL_STYLE = {
-    "background": "#ffffff", "borderRadius": "12px", "width": "560px",
-    "maxWidth": "92vw", "maxHeight": "88vh", "overflowY": "auto",
-    "padding": "28px", "boxShadow": "0 20px 60px rgba(0,0,0,0.25)",
-}
-FIELD_LABEL_STYLE = {
-    "fontSize": "11px", "color": "#718096", "fontWeight": "700",
-    "marginBottom": "5px", "display": "block",
-    "textTransform": "uppercase", "letterSpacing": "0.04em",
-}
-FIELD_WRAP_STYLE = {"marginBottom": "16px"}
-PRIMARY_BTN_STYLE = {
-    "padding": "9px 20px", "fontWeight": "700", "fontSize": "13px",
-    "background": "#3182ce", "color": "#fff", "border": "none",
-    "borderRadius": "6px", "cursor": "pointer",
-}
-SECONDARY_BTN_STYLE = {
-    "padding": "9px 20px", "fontWeight": "600", "fontSize": "13px",
-    "background": "#f7fafc", "color": "#718096", "border": "1px solid #cbd5e0",
-    "borderRadius": "6px", "cursor": "pointer",
-}
-DANGER_BTN_STYLE = {
-    "padding": "4px 10px", "fontWeight": "700", "fontSize": "12px",
-    "background": "#fff5f5", "color": "#9b2c2c", "border": "1px solid #fed7d7",
-    "borderRadius": "4px", "cursor": "pointer",
-}
-REMOVE_PRIMARY_BTN_STYLE = {
-    "padding": "9px 20px", "fontWeight": "700", "fontSize": "13px",
-    "background": "#9b2c2c", "color": "#fff", "border": "none",
-    "borderRadius": "6px", "cursor": "pointer",
-}
-NUMBER_INPUT_STYLE = {"width": "100%", "padding": "8px", "borderRadius": "6px", "border": "1px solid #cbd5e0"}
-
-WIZ_STEP_LABELS = ["Quantity & Brand", "Model & Body Type", "Characteristics", "Customer", "Price & Review"]
-REMOVE_WIZ_STEP_LABELS = ["Brand", "Model & Body Type", "Characteristics", "Quantity & Review"]
-
-
-# ── Helpers ──────────────────────────────────────────────────────────────────
-
-def _lbl(options: list[dict], value: str) -> str:
-    return next((o["label"] for o in options if o["value"] == value), value)
-
-
-def _fmt_val(v, sign: bool = False) -> str:
-    if isinstance(v, float) and np.isnan(v):
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+def normalize_text(value: Any) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
         return ""
-    prefix = "+" if sign and v > 0 else ""
-    abs_v = abs(v)
-    if abs_v >= 1_000_000:
-        return f"{prefix}{v / 1_000_000:.1f}M"
-    if abs_v >= 1_000:
-        return f"{prefix}{v / 1_000:.1f}K"
-    if isinstance(v, float):
-        return f"{prefix}{v:.1f}"
-    return f"{prefix}{int(v)}"
+    text = str(value).strip().upper()
+    text = re.sub(r"\s+", " ", text)
+    return text
 
 
-def _panel_title(text: str, **extra_style):
-    style = {"fontWeight": "700", "fontSize": "13px", "color": "#1a1a2e",
-              "marginBottom": "12px", "letterSpacing": "0.02em"}
-    style.update(extra_style)
-    return html.Div(text, style=style)
+def truncate_label(value: Any, max_length: int = 28) -> str:
+    text = "" if value is None or (isinstance(value, float) and pd.isna(value)) else str(value)
+    if len(text) <= max_length:
+        return text
+    return text[: max_length - 1] + "…"
 
 
-def _wiz_field(label: str, component):
-    return html.Div([html.Label(label, style=FIELD_LABEL_STYLE), component], style=FIELD_WRAP_STYLE)
+def format_bytes(num_bytes: int) -> str:
+    if num_bytes < 1024:
+        return f"{num_bytes} B"
+    if num_bytes < 1024 * 1024:
+        return f"{num_bytes / 1024:.1f} KiB"
+    return f"{num_bytes / (1024 * 1024):.1f} MiB"
 
 
-# ── Wizard modal ─────────────────────────────────────────────────────────────
+def format_pct(value: float) -> str:
+    return f"{value:.1f}%"
 
-wizard_modal = html.Div(
-    id="wiz-modal",
-    style=MODAL_OVERLAY_STYLE,
-    children=[
-        html.Div(
-            style=MODAL_PANEL_STYLE,
-            children=[
-                html.Div(
-                    [
-                        html.Div("Add Vehicles", style={"fontWeight": "700", "fontSize": "17px", "color": "#1a1a2e"}),
-                        html.Div(id="wiz-step-indicator"),
-                    ],
-                    style={"marginBottom": "20px"},
-                ),
 
-                # Step 0 — Quantity & Brand
-                html.Div(
-                    id="wiz-step-0",
-                    children=[
-                        _wiz_field("Number of vehicles", dcc.Input(
-                            id="wiz-qty", type="number", min=1, step=1, value=100, style=NUMBER_INPUT_STYLE)),
-                        _wiz_field("Brand", dcc.Dropdown(
-                            id="wiz-brand", options=[{"label": b, "value": b} for b in _brands_avail],
-                            placeholder="Select a brand", clearable=False)),
-                    ],
-                ),
-
-                # Step 1 — Model & Body Type
-                html.Div(
-                    id="wiz-step-1", style={"display": "none"},
-                    children=[
-                        _wiz_field("Model", dcc.Dropdown(
-                            id="wiz-model", options=[], placeholder="Select a model", clearable=False)),
-                        _wiz_field("Body Type", dcc.Dropdown(
-                            id="wiz-bodytype", options=[], placeholder="Select a body type", clearable=False)),
-                    ],
-                ),
-
-                # Step 2 — Characteristics
-                html.Div(
-                    id="wiz-step-2", style={"display": "none"},
-                    children=[
-                        _wiz_field("Power Category", dcc.Dropdown(
-                            id="wiz-power", options=[], placeholder="Select a power category", clearable=False)),
-                        _wiz_field("CO2 Bucket", dcc.Dropdown(
-                            id="wiz-co2", options=[], placeholder="Select a CO2 bucket", clearable=False)),
-                    ],
-                ),
-
-                # Step 3 — Customer
-                html.Div(
-                    id="wiz-step-3", style={"display": "none"},
-                    children=[
-                        _wiz_field("Customer", dcc.RadioItems(
-                            id="wiz-customer-mode",
-                            options=[{"label": " Existing customer", "value": "existing"},
-                                     {"label": " New customer",      "value": "new"}],
-                            value="existing", inline=True,
-                            inputStyle={"marginRight": "4px"},
-                            labelStyle={"marginRight": "20px", "fontSize": "13px", "cursor": "pointer"},
-                        )),
-                        html.Div(
-                            id="wiz-existing-panel",
-                            children=[
-                                _wiz_field("Search Customer (Obligor ID or Industry)", dcc.Dropdown(
-                                    id="wiz-customer-search", options=[], searchable=True, clearable=True,
-                                    placeholder="Type to search an existing customer...")),
-                                html.Div(id="wiz-existing-info"),
-                            ],
-                        ),
-                        html.Div(
-                            id="wiz-new-panel", style={"display": "none"},
-                            children=[
-                                _wiz_field("Industry", dcc.Dropdown(
-                                    id="wiz-new-industry",
-                                    options=[{"label": i, "value": i} for i in INDUSTRY_OPTIONS],
-                                    placeholder="Select an industry")),
-                                _wiz_field("Group Rating", dcc.Dropdown(
-                                    id="wiz-new-group-rating",
-                                    options=[{"label": r, "value": r} for r in GROUP_RATING_OPTIONS],
-                                    placeholder="Select a group rating")),
-                                _wiz_field("Counterparty Rating", dcc.Dropdown(
-                                    id="wiz-new-cp-rating",
-                                    options=[{"label": r, "value": r} for r in COUNTERPARTY_RATING_OPTIONS],
-                                    placeholder="Select a counterparty rating")),
-                                _wiz_field("CLS Rating (optional)", dcc.Dropdown(
-                                    id="wiz-new-cls-rating",
-                                    options=[{"label": _cls_rating_label(r), "value": r}
-                                             for r in CLS_RATING_OPTIONS],
-                                    placeholder="Select a CLS rating")),
-                                _wiz_field("Shared Client Flag", dcc.Dropdown(
-                                    id="wiz-new-shared-flag",
-                                    options=[{"label": s, "value": s} for s in SHARED_FLAG_OPTIONS],
-                                    placeholder="Select a shared client flag")),
-                            ],
-                        ),
-                    ],
-                ),
-
-                # Step 4 — Price & Review
-                html.Div(
-                    id="wiz-step-4", style={"display": "none"},
-                    children=[
-                        _wiz_field("Vehicle Price (EUR)", dcc.Input(
-                            id="wiz-price", type="number", min=0, step=100, style=NUMBER_INPUT_STYLE)),
-                        _wiz_field("Exposure Amount LTR (EUR)", dcc.Input(
-                            id="wiz-exposure-ltr", type="number", min=0, step=100, style=NUMBER_INPUT_STYLE)),
-                        _wiz_field("Exposure Amount MTR (EUR)", dcc.Input(
-                            id="wiz-exposure-mtr", type="number", min=0, step=100, style=NUMBER_INPUT_STYLE)),
-                        html.Div("Summary", style={
-                            "fontSize": "11px", "color": "#718096", "fontWeight": "700",
-                            "textTransform": "uppercase", "letterSpacing": "0.04em", "margin": "18px 0 8px",
-                        }),
-                        html.Div(id="wiz-summary"),
-                    ],
-                ),
-
-                html.Div(id="wiz-validation-msg", style={
-                    "color": "#c53030", "fontSize": "12px", "fontWeight": "600",
-                    "margin": "14px 0 0", "minHeight": "16px",
-                }),
-
-                html.Div(
-                    [
-                        html.Button("Cancel", id="wiz-btn-cancel", n_clicks=0, style=SECONDARY_BTN_STYLE),
-                        html.Div(
-                            [
-                                html.Button("Back", id="wiz-btn-back", n_clicks=0, style=SECONDARY_BTN_STYLE),
-                                html.Button("Next", id="wiz-btn-primary", n_clicks=0, style=PRIMARY_BTN_STYLE),
-                            ],
-                            style={"display": "flex", "gap": "10px"},
-                        ),
-                    ],
-                    style={"display": "flex", "justifyContent": "space-between", "marginTop": "18px",
-                           "borderTop": "1px solid #e2e8f0", "paddingTop": "16px"},
-                ),
-            ],
-        ),
-    ],
-)
-
-
-# ── Remove Vehicles wizard modal ────────────────────────────────────────────
-# Mirrors wizard_modal step for step (same cascading Brand -> Model & Body Type ->
-# Characteristics flow) so the two wizards behave identically. It stops one step
-# short since Customer and Price don't apply to vehicles that already exist, and
-# ends on a Quantity & Review step: the quantity to remove is asked last, once
-# the full filter combination — and therefore the true maximum available — is
-# known, instead of asking for a number before the ceiling is even computed.
-
-remove_wizard_modal = html.Div(
-    id="rwiz-modal",
-    style=MODAL_OVERLAY_STYLE,
-    children=[
-        html.Div(
-            style=MODAL_PANEL_STYLE,
-            children=[
-                html.Div(
-                    [
-                        html.Div("Remove Vehicles", style={"fontWeight": "700", "fontSize": "17px", "color": "#1a1a2e"}),
-                        html.Div(id="rwiz-step-indicator"),
-                    ],
-                    style={"marginBottom": "12px"},
-                ),
-
-                html.Div(id="rwiz-count", style={
-                    "fontSize": "12px", "color": "#4a5568", "fontWeight": "600",
-                    "padding": "8px 10px", "background": "#f7fafc", "borderRadius": "6px",
-                    "marginBottom": "16px",
-                }),
-
-                # Step 0 — Brand
-                html.Div(
-                    id="rwiz-step-0",
-                    children=[
-                        _wiz_field("Brand", dcc.Dropdown(
-                            id="rwiz-brand", options=[{"label": b, "value": b} for b in _brands_avail],
-                            placeholder="Select a brand", clearable=False)),
-                    ],
-                ),
-
-                # Step 1 — Model & Body Type
-                html.Div(
-                    id="rwiz-step-1", style={"display": "none"},
-                    children=[
-                        _wiz_field("Model", dcc.Dropdown(
-                            id="rwiz-model", options=[], placeholder="Select a model", clearable=False)),
-                        _wiz_field("Body Type", dcc.Dropdown(
-                            id="rwiz-bodytype", options=[], placeholder="Select a body type", clearable=False)),
-                    ],
-                ),
-
-                # Step 2 — Characteristics
-                html.Div(
-                    id="rwiz-step-2", style={"display": "none"},
-                    children=[
-                        _wiz_field("Power Category", dcc.Dropdown(
-                            id="rwiz-power", options=[], placeholder="Select a power category", clearable=False)),
-                        _wiz_field("CO2 Bucket", dcc.Dropdown(
-                            id="rwiz-co2", options=[], placeholder="Select a CO2 bucket", clearable=False)),
-                    ],
-                ),
-
-                # Step 3 — Quantity & Review
-                html.Div(
-                    id="rwiz-step-3", style={"display": "none"},
-                    children=[
-                        _wiz_field("Number of vehicles to remove", dcc.Input(
-                            id="rwiz-qty", type="number", min=1, step=1, style=NUMBER_INPUT_STYLE)),
-                        html.Div("Summary", style={
-                            "fontSize": "11px", "color": "#718096", "fontWeight": "700",
-                            "textTransform": "uppercase", "letterSpacing": "0.04em", "margin": "0 0 8px",
-                        }),
-                        html.Div(id="rwiz-summary"),
-                    ],
-                ),
-
-                html.Div(id="rwiz-validation-msg", style={
-                    "color": "#c53030", "fontSize": "12px", "fontWeight": "600",
-                    "margin": "14px 0 0", "minHeight": "16px",
-                }),
-
-                html.Div(
-                    [
-                        html.Button("Cancel", id="rwiz-btn-cancel", n_clicks=0, style=SECONDARY_BTN_STYLE),
-                        html.Div(
-                            [
-                                html.Button("Back", id="rwiz-btn-back", n_clicks=0, style=SECONDARY_BTN_STYLE),
-                                html.Button("Next", id="rwiz-btn-primary", n_clicks=0, style=REMOVE_PRIMARY_BTN_STYLE),
-                            ],
-                            style={"display": "flex", "gap": "10px"},
-                        ),
-                    ],
-                    style={"display": "flex", "justifyContent": "space-between", "marginTop": "18px",
-                           "borderTop": "1px solid #e2e8f0", "paddingTop": "16px"},
-                ),
-            ],
-        ),
-    ],
-)
-
-
-# ── Layout ───────────────────────────────────────────────────────────────────
-
-app.layout = html.Div(
-    [
-        dcc.Store(id="page-store",     data=0),
-        dcc.Store(id="npages-store",   data=1),
-        dcc.Store(id="refresh-ts",     data=0),
-        dcc.Store(id="cob-store",      data={"granularity": "monthly", "period": _default_cob_period}),
-        dcc.Store(id="batch-store",    data=[]),
-        dcc.Store(id="wiz-step-store", data=0),
-        dcc.Store(id="remove-batch-store", data=[]),
-        dcc.Store(id="rwiz-step-store",    data=0),
-
-        # ── Header ──────────────────────────────────────────────────────────
-        html.Div(
-            [
-                html.Div(
-                    [
-                        html.H1("Use Case 1 — Portfolio Heatmap",
-                                style={"margin": "0", "fontSize": "22px", "fontWeight": "700", "color": "#1a1a2e"}),
-                    ]
-                ),
-            ],
-            style={"padding": "20px 28px 16px", "borderBottom": "1px solid #e2e8f0",
-                   "background": "#ffffff"},
-        ),
-
-        # ── Global Period bar ────────────────────────────────────────────────
-        html.Div(
-            [
-                html.Span("Period",
-                          style={"fontWeight": "700", "fontSize": "11px", "color": "#718096",
-                                 "letterSpacing": "0.06em", "textTransform": "uppercase",
-                                 "marginRight": "14px", "whiteSpace": "nowrap"}),
-                dcc.Dropdown(
-                    id="cob-granularity",
-                    options=[
-                        {"label": "Monthly",   "value": "monthly"},
-                        {"label": "Quarterly", "value": "quarterly"},
-                        {"label": "Yearly",    "value": "yearly"},
-                    ],
-                    value="monthly",
-                    clearable=False,
-                    style={"width": "130px", "fontSize": "13px"},
-                ),
-                dcc.Dropdown(
-                    id="cob-period",
-                    options=[{"label": p, "value": p} for p in _cob_monthly_vals],
-                    value=_default_cob_period,
-                    clearable=False,
-                    style={"width": "150px", "fontSize": "13px"},
-                ),
-            ],
-            style={"display": "flex", "alignItems": "center", "gap": "6px",
-                   "padding": "8px 28px", "background": "#f7fafc",
-                   "borderBottom": "1px solid #e2e8f0"},
-        ),
-
-        # ── Main content ─────────────────────────────────────────────────────
-        html.Div(
-            [
-                # ── Filters panel ────────────────────────────────────────────
-                html.Div(
-                    [
-                        _panel_title("Filters"),
-                        html.Div("Country", style={"fontSize": "11px", "color": "#718096", "fontWeight": "600", "marginBottom": "4px"}),
-                        dcc.Dropdown(
-                            id="f-country",
-                            options=[{"label": "ALL", "value": "ALL"}] + [{"label": c, "value": c} for c in _countries_avail],
-                            value="ALL", clearable=False,
-                            style={"marginBottom": "12px"},
-                        ),
-                        html.Div("Asset Status", style={"fontSize": "11px", "color": "#718096", "fontWeight": "600", "marginBottom": "4px"}),
-                        dcc.Dropdown(
-                            id="f-asset-status",
-                            options=ASSET_STATUS_OPTIONS,
-                            value="IN FLEET", clearable=False,
-                            style={"marginBottom": "12px"},
-                        ),
-                        html.Div("Brand", style={"fontSize": "11px", "color": "#718096", "fontWeight": "600", "marginBottom": "4px"}),
-                        dcc.Dropdown(id="f-brand", options=[{"label": b, "value": b} for b in _brands_avail],
-                                     multi=True, placeholder="All brands", style={"marginBottom": "12px"}),
-                        html.Div("Market Model", style={"fontSize": "11px", "color": "#718096", "fontWeight": "600", "marginBottom": "4px"}),
-                        dcc.Dropdown(id="f-model", options=[{"label": m, "value": m} for m in _models_avail],
-                                     multi=True, placeholder="All models", style={"marginBottom": "12px"}),
-                        html.Div("Body Type", style={"fontSize": "11px", "color": "#718096", "fontWeight": "600", "marginBottom": "4px"}),
-                        dcc.Dropdown(id="f-bodytype", options=[{"label": bt, "value": bt} for bt in _btypes_avail],
-                                     multi=True, placeholder="All body types", style={"marginBottom": "20px"}),
-
-                        html.Hr(style={"borderColor": "#e2e8f0", "margin": "0 0 16px"}),
-                        _panel_title("Axes & Metric"),
-                        html.Div("Y Axis", style={"fontSize": "11px", "color": "#718096", "fontWeight": "600", "marginBottom": "4px"}),
-                        dcc.Dropdown(id="f-y", options=Y_OPTIONS, value="BRAND_UPDATE",
-                                     clearable=False, style={"marginBottom": "12px"}),
-                        html.Div("X Axis", style={"fontSize": "11px", "color": "#718096", "fontWeight": "600", "marginBottom": "4px"}),
-                        dcc.Dropdown(id="f-x", options=X_OPTIONS, value="GROUP_RATING",
-                                     clearable=False, style={"marginBottom": "12px"}),
-                        html.Div("Metric", style={"fontSize": "11px", "color": "#718096", "fontWeight": "600", "marginBottom": "4px"}),
-                        dcc.Dropdown(id="f-metric", options=METRIC_OPTIONS, value="volume",
-                                     clearable=False, style={"marginBottom": "20px"}),
-
-                        html.Button("Refresh", id="btn-refresh", n_clicks=0,
-                                    style={"width": "100%", "padding": "8px", "fontWeight": "600",
-                                           "fontSize": "13px", "background": "#3182ce",
-                                           "color": "#fff", "border": "none", "borderRadius": "6px",
-                                           "cursor": "pointer", "marginBottom": "8px"}),
-                        html.Button("Simulation", id="btn-sim-toggle", n_clicks=0,
-                                    style={"width": "100%", "padding": "8px", "fontWeight": "600",
-                                           "fontSize": "13px", "background": "#f7fafc",
-                                           "color": "#3182ce", "border": "1px solid #3182ce",
-                                           "borderRadius": "6px", "cursor": "pointer"}),
-                    ],
-                    style={"width": "240px", "minWidth": "240px", "padding": "20px",
-                           "background": "#ffffff", "borderRight": "1px solid #e2e8f0",
-                           "overflowY": "auto"},
-                ),
-
-                # ── Right: heatmap + simulation ──────────────────────────────
-                html.Div(
-                    [
-                        # Heatmap panel
-                        html.Div(
-                            [
-                                html.Div(id="kpi-headline", style={
-                                    "fontSize": "13px", "fontWeight": "700", "color": "#1a1a2e",
-                                    "marginBottom": "12px", "padding": "10px 14px",
-                                    "background": "#f0f7ff", "border": "1px solid #bee3f8",
-                                    "borderRadius": "6px",
-                                }),
-                                html.Div(
-                                    [
-                                        html.Div(id="heatmap-title",
-                                                 style={"fontWeight": "700", "fontSize": "14px",
-                                                        "color": "#1a1a2e", "flex": "1"}),
-                                        html.Div(
-                                            [
-                                                html.Button("◀", id="btn-prev", n_clicks=0,
-                                                            style={"padding": "4px 12px", "fontSize": "13px",
-                                                                   "background": "#edf2f7", "border": "1px solid #cbd5e0",
-                                                                   "borderRadius": "4px", "cursor": "pointer"}),
-                                                html.Span(id="page-info", children="Page 1 / 1",
-                                                          style={"margin": "0 12px", "fontWeight": "600",
-                                                                 "fontSize": "12px", "color": "#718096",
-                                                                 "whiteSpace": "nowrap"}),
-                                                html.Button("▶", id="btn-next", n_clicks=0,
-                                                            style={"padding": "4px 12px", "fontSize": "13px",
-                                                                   "background": "#edf2f7", "border": "1px solid #cbd5e0",
-                                                                   "borderRadius": "4px", "cursor": "pointer"}),
-                                            ],
-                                            style={"display": "flex", "alignItems": "center"},
-                                        ),
-                                    ],
-                                    style={"display": "flex", "alignItems": "center",
-                                           "marginBottom": "12px"},
-                                ),
-                                dcc.Graph(id="heatmap", config={"displayModeBar": False}),
-                            ],
-                            style={"background": "#ffffff", "borderRadius": "8px",
-                                   "border": "1px solid #e2e8f0", "padding": "20px",
-                                   "marginBottom": "16px"},
-                        ),
-
-                        # Simulation panel
-                        html.Div(
-                            id="sim-panel",
-                            style={"display": "none"},
-                            children=[
-                                html.Div(
-                                    [
-                                        html.Div(
-                                            [
-                                                _panel_title("Add Vehicles"),
-                                                html.P(
-                                                    "Define a fully-specified batch of new vehicles — brand, model, "
-                                                    "power category, CO2 bucket, customer, ratings and price — via a "
-                                                    "guided wizard. Every field is chosen explicitly, nothing is "
-                                                    "randomly sampled.",
-                                                    style={"fontSize": "12px", "color": "#718096", "margin": "0 0 14px"},
-                                                ),
-                                                html.Button("+ Add Vehicles", id="btn-open-wizard", n_clicks=0,
-                                                            style=PRIMARY_BTN_STYLE),
-                                            ],
-                                            style={"background": "#ffffff", "borderRadius": "8px",
-                                                   "border": "1px solid #e2e8f0", "padding": "20px", "flex": "1"},
-                                        ),
-                                        html.Div(
-                                            [
-                                                _panel_title("Remove Vehicles"),
-                                                html.P(
-                                                    "Pick an existing group of vehicles the same way — brand, model, "
-                                                    "body type, power category and CO2 bucket — via the same guided "
-                                                    "wizard. The number of matching vehicles is shown live at every "
-                                                    "step.",
-                                                    style={"fontSize": "12px", "color": "#718096", "margin": "0 0 14px"},
-                                                ),
-                                                html.Button("− Remove Vehicles", id="btn-open-remove-wizard", n_clicks=0,
-                                                            style=REMOVE_PRIMARY_BTN_STYLE),
-                                            ],
-                                            style={"background": "#ffffff", "borderRadius": "8px",
-                                                   "border": "1px solid #e2e8f0", "padding": "20px", "flex": "1"},
-                                        ),
-                                    ],
-                                    style={"display": "flex", "gap": "16px", "marginBottom": "16px"},
-                                ),
-
-                                html.Div(
-                                    [
-                                        _panel_title("Pending Batch — Vehicles to be Added"),
-                                        html.Div(id="pending-batch-list", children=[
-                                            html.P("No vehicles queued yet. Use “+ Add Vehicles” to define a batch.",
-                                                   style={"fontSize": "12px", "color": "#a0aec0", "fontStyle": "italic"}),
-                                        ]),
-                                    ],
-                                    style={"background": "#ffffff", "borderRadius": "8px",
-                                           "border": "1px solid #e2e8f0", "padding": "20px", "marginBottom": "16px"},
-                                ),
-
-                                html.Div(
-                                    [
-                                        _panel_title("Pending Removals — Vehicles to be Removed"),
-                                        html.Div(id="pending-removal-list", children=[
-                                            html.P("No removals queued yet. Use “− Remove Vehicles” to define one.",
-                                                   style={"fontSize": "12px", "color": "#a0aec0", "fontStyle": "italic"}),
-                                        ]),
-                                    ],
-                                    style={"background": "#ffffff", "borderRadius": "8px",
-                                           "border": "1px solid #e2e8f0", "padding": "20px", "marginBottom": "16px"},
-                                ),
-
-                                html.Div(
-                                    [
-                                        html.Button("Run Simulation", id="btn-sim-run", n_clicks=0,
-                                                    style={"padding": "8px 20px", "fontWeight": "600",
-                                                           "fontSize": "13px", "background": "#276749",
-                                                           "color": "#fff", "border": "none",
-                                                           "borderRadius": "6px", "cursor": "pointer"}),
-                                        html.Button("Reset", id="btn-sim-reset", n_clicks=0,
-                                                    style={"padding": "8px 20px", "fontWeight": "600",
-                                                           "fontSize": "13px", "background": "#f7fafc",
-                                                           "color": "#718096", "border": "1px solid #cbd5e0",
-                                                           "borderRadius": "6px", "cursor": "pointer"}),
-                                    ],
-                                    style={"display": "flex", "gap": "10px", "marginBottom": "16px"},
-                                ),
-                                html.Div(id="sim-result"),
-                            ],
-                        ),
-                    ],
-                    style={"flex": "1", "padding": "20px", "overflowY": "auto",
-                           "background": "#f7fafc"},
-                ),
-            ],
-            style={"display": "flex", "height": "calc(100vh - 115px)", "overflow": "hidden"},
-        ),
-
-        wizard_modal,
-        remove_wizard_modal,
-    ],
-    style={"fontFamily": "Inter, -apple-system, sans-serif", "height": "100vh",
-           "display": "flex", "flexDirection": "column", "background": "#f7fafc"},
-)
-
-
-# =============================================================================
-# Callbacks — Global COB filter
-# =============================================================================
-
-@app.callback(
-    Output("cob-period", "options"),
-    Output("cob-period", "value"),
-    Input("cob-granularity", "value"),
-)
-def _cob_period_opts(gran):
-    if gran == "quarterly":
-        opts = [{"label": q, "value": q} for q in _cob_quarterly_vals]
-        default = _cob_quarterly_vals[-1] if _cob_quarterly_vals else None
-    elif gran == "yearly":
-        opts = [{"label": y, "value": y} for y in _cob_yearly_vals]
-        default = _cob_yearly_vals[-1] if _cob_yearly_vals else None
-    else:
-        opts = [{"label": p, "value": p} for p in _cob_monthly_vals]
-        default = _cob_monthly_vals[-1] if _cob_monthly_vals else None
-    return opts, default
-
-
-@app.callback(
-    Output("cob-store", "data"),
-    Input("cob-granularity", "value"),
-    Input("cob-period", "value"),
-)
-def _cob_store(gran, period):
-    return {"granularity": gran or "monthly", "period": period}
-
-
-# =============================================================================
-# Callbacks — Filter option cascading
-# =============================================================================
-
-@app.callback(
-    Output("f-brand",   "options"),
-    Output("f-model",   "options"),
-    Output("f-bodytype","options"),
-    Input("f-country", "value"),
-    Input("f-asset-status", "value"),
-    Input("f-brand", "value"),
-    State("cob-store",  "data"),
-)
-def _filter_opts(country, asset_status, brands_selected, cob_store):
-    cob = cob_store or {}
-    d = apply_filters(country, None, None, None, asset_status)
-    d = apply_cob_filter(d, cob.get("granularity", "monthly"), cob.get("period") or "")
-    brands  = [{"label": b,  "value": b}  for b  in sorted(d["BRAND_UPDATE"].dropna().unique())]   if "BRAND_UPDATE"      in d.columns else []
-
-    d_scoped = d[d["BRAND_UPDATE"].isin(brands_selected)] if brands_selected else d
-    models  = [{"label": m,  "value": m}  for m  in sorted(d_scoped["MARKET_MODEL"].dropna().unique())]   if "MARKET_MODEL"      in d_scoped.columns else []
-    btypes  = [{"label": bt, "value": bt} for bt in sorted(d_scoped["MARKET_BODY_GROUP"].dropna().unique())] if "MARKET_BODY_GROUP" in d_scoped.columns else []
-    return brands, models, btypes
-
-
-@app.callback(
-    Output("f-brand", "value"),
-    Input("f-model", "value"),
-    prevent_initial_call=True,
-)
-def _model_selects_brand(models_selected):
-    if not models_selected:
-        return no_update
-    brands = sorted({b for m in models_selected for b in MODEL_BRAND_MAP.get(m, [])})
-    return brands if brands else no_update
-
-
-@app.callback(
-    Output("f-y", "options"),
-    Output("f-x", "options"),
-    Input("f-y", "value"),
-    Input("f-x", "value"),
-)
-def _axis_mutual_exclusion(y_val, x_val):
-    y_opts = [o for o in ALL_AXIS_OPTIONS if o["value"] != x_val]
-    x_opts = [o for o in ALL_AXIS_OPTIONS if o["value"] != y_val]
-    return y_opts, x_opts
-
-
-# =============================================================================
-# Callbacks — Pagination
-# =============================================================================
-
-@app.callback(
-    Output("page-store", "data"),
-    Input("btn-prev",    "n_clicks"),
-    Input("btn-next",    "n_clicks"),
-    Input("btn-refresh", "n_clicks"),
-    State("page-store",  "data"),
-    State("npages-store","data"),
-    prevent_initial_call=True,
-)
-def _update_page(prev, nxt, ref, page, n_pages):
-    trig   = callback_context.triggered[0]["prop_id"]
-    page   = page or 0
-    n_pages = max(1, n_pages or 1)
-    if "prev"    in trig: return max(0, page - 1)
-    if "next"    in trig: return min(n_pages - 1, page + 1)
-    return 0  # refresh → back to page 0
-
-
-@app.callback(
-    Output("refresh-ts", "data"),
-    Input("btn-refresh", "n_clicks"),
-    prevent_initial_call=True,
-)
-def _refresh_ts(n):
-    return n
-
-
-# =============================================================================
-# Callbacks — Main heatmap
-# =============================================================================
-
-def _kpi_text(metric: str, total: float) -> str:
-    m_lbl = _lbl(METRIC_OPTIONS, metric)
-    if metric == "volume":
-        return f"Total {m_lbl}: {int(total):,}"
-    return f"{m_lbl} (total): {format_millions(total)} million"
-
-
-@app.callback(
-    Output("heatmap",       "figure"),
-    Output("heatmap-title", "children"),
-    Output("page-info",     "children"),
-    Output("npages-store",  "data"),
-    Output("kpi-headline",  "children"),
-    Input("page-store",  "data"),
-    Input("refresh-ts",  "data"),
-    State("f-country",   "value"),
-    State("f-asset-status", "value"),
-    State("f-brand",     "value"),
-    State("f-model",     "value"),
-    State("f-bodytype",  "value"),
-    State("f-y",         "value"),
-    State("f-x",         "value"),
-    State("f-metric",    "value"),
-    State("cob-store",   "data"),
-)
-def _heatmap(page, _ts, country, asset_status, brands, models, bodytypes, y_col, x_col,
-             metric, cob_store):
-    page   = page or 0
-    y_col  = y_col  or "BRAND_UPDATE"
-    x_col  = x_col  or "GROUP_RATING"
-    metric = metric or "volume"
-    cob    = cob_store or {}
-
-    d = apply_filters(country, brands, models, bodytypes, asset_status)
-    d = apply_cob_filter(d, cob.get("granularity", "monthly"), cob.get("period") or "")
-
-    total_value  = compute_total_metric(d, metric)
-    kpi_text     = _kpi_text(metric, total_value)
-    period_label = cob.get("period") or "All"
-    title_text   = f"{_lbl(METRIC_OPTIONS, metric)}  ·  {_lbl(Y_OPTIONS, y_col)} × {_lbl(X_OPTIONS, x_col)}  [{period_label}]"
-
-    piv     = build_pivot(d, y_col, x_col, metric)
-    n_rows  = len(piv)
-    n_pages = max(1, (n_rows + PAGE_SIZE - 1) // PAGE_SIZE)
-    page    = max(0, min(page, n_pages - 1))
-
-    fig  = make_heatmap_fig(piv, title_text, "Blues", page, show_totals=True)
-    info = f"Page {page + 1} / {n_pages}  ({n_rows} categories)"
-    return fig, title_text, info, n_pages, kpi_text
-
-
-# =============================================================================
-# Callbacks — Simulation panel toggle
-# =============================================================================
-
-@app.callback(
-    Output("sim-panel", "style"),
-    Input("btn-sim-toggle", "n_clicks"),
-    State("sim-panel", "style"),
-    prevent_initial_call=True,
-)
-def _toggle_sim(_, style):
-    if style and style.get("display") == "none":
-        return {"display": "block"}
-    return {"display": "none"}
-
-
-# =============================================================================
-# Callbacks — Add Vehicles wizard: cascading options
-# =============================================================================
-
-@app.callback(
-    Output("wiz-model", "options"),
-    Output("wiz-model", "value"),
-    Output("wiz-bodytype", "options"),
-    Output("wiz-bodytype", "value"),
-    Input("wiz-brand", "value"),
-    prevent_initial_call=True,
-)
-def _wiz_brand_change(brand):
-    models  = BRAND_MODEL_MAP.get(brand, [])    if brand else []
-    btypes  = BRAND_BODYTYPE_MAP.get(brand, []) if brand else []
-    return (
-        [{"label": m, "value": m} for m in models], None,
-        [{"label": b, "value": b} for b in btypes], None,
+def metric_kv_card(label: str, value: Any) -> html.Div:
+    return html.Div(
+        [
+            html.Div(str(label), className="metric-label"),
+            html.Div(str(value), className="metric-value-small"),
+        ],
+        className="summary-kv-card",
     )
 
 
-@app.callback(
-    Output("wiz-power", "options"),
-    Output("wiz-power", "value"),
-    Output("wiz-co2", "options"),
-    Output("wiz-co2", "value"),
-    Input("wiz-brand", "value"),
-    Input("wiz-model", "value"),
-    prevent_initial_call=True,
-)
-def _wiz_characteristics_options(brand, model):
-    if not brand:
-        return [], None, [], None
-    sub = UC1_DF[UC1_DF["BRAND_UPDATE"] == brand]
-    if model and "MARKET_MODEL" in UC1_DF.columns:
-        model_sub = sub[sub["MARKET_MODEL"] == model]
-        if not model_sub.empty:
-            sub = model_sub
-    powers = sorted(sub["POWER_CATEGORY"].dropna().unique().tolist()) if "POWER_CATEGORY" in sub.columns else []
-    if not powers:
-        powers = POWER_CATEGORY_OPTIONS
-    co2s = sorted(sub["CO2_BUCKET"].dropna().unique().tolist(), key=_co2_bucket_low) if "CO2_BUCKET" in sub.columns else []
-    if not co2s:
-        co2s = CO2_BUCKET_OPTIONS
-    return (
-        [{"label": p, "value": p} for p in powers], None,
-        [{"label": c, "value": c} for c in co2s], None,
+def month_period_start(yyyymm: str) -> pd.Timestamp:
+    return pd.Timestamp(year=int(yyyymm[:4]), month=int(yyyymm[4:6]), day=1)
+
+
+def month_year_to_start(year_value: int | None, month_value: int | None) -> pd.Timestamp | None:
+    if year_value is None or month_value is None:
+        return None
+    return pd.Timestamp(year=int(year_value), month=int(month_value), day=1)
+
+
+def month_year_to_end(year_value: int | None, month_value: int | None) -> pd.Timestamp | None:
+    if year_value is None or month_value is None:
+        return None
+    return pd.Timestamp(year=int(year_value), month=int(month_value), day=1) + pd.offsets.MonthEnd(1)
+
+
+def build_month_year_range_block(
+    start_year_id: Any,
+    start_month_id: Any,
+    end_year_id: Any,
+    end_month_id: Any,
+    year_options: list[dict[str, Any]],
+    start_year_value: int | None,
+    start_month_value: int | None,
+    end_year_value: int | None,
+    end_month_value: int | None,
+) -> html.Div:
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.Div(
+                        [
+                            html.Div("Debut", className="hint-text"),
+                            html.Div(
+                                [
+                                    dcc.Dropdown(id=start_year_id, options=year_options, value=start_year_value, placeholder="Année", clearable=False),
+                                    dcc.Dropdown(id=start_month_id, options=MONTH_OPTIONS, value=start_month_value, placeholder="Mois", clearable=False),
+                                ],
+                                className="month-pair-row",
+                            ),
+                        ],
+                        className="month-side",
+                    ),
+                    html.Div(className="month-range-divider"),
+                    html.Div(
+                        [
+                            html.Div("Fin", className="hint-text"),
+                            html.Div(
+                                [
+                                    dcc.Dropdown(id=end_year_id, options=year_options, value=end_year_value, placeholder="Année", clearable=False),
+                                    dcc.Dropdown(id=end_month_id, options=MONTH_OPTIONS, value=end_month_value, placeholder="Mois", clearable=False),
+                                ],
+                                className="month-pair-row",
+                            ),
+                        ],
+                        className="month-side",
+                    ),
+                ],
+                className="month-range-columns",
+            ),
+        ]
+        ,
+        className="month-range-block",
     )
 
 
-@app.callback(
-    Output("wiz-price", "value"),
-    Output("wiz-exposure-ltr", "value"),
-    Output("wiz-exposure-mtr", "value"),
-    Input("wiz-brand", "value"),
-    Input("wiz-model", "value"),
-    prevent_initial_call=True,
-)
-def _wiz_price_defaults(brand, model):
-    if not brand:
-        return None, None, None
-    price = round(median_price_for(brand, model), 2)
-    return price, round(price * 0.55, 2), round(price * 0.10, 2)
+def format_year_month(year: int | None, month: int | None) -> str:
+    if year is None or month is None:
+        return ""
+    return f"{int(year):04d}-{int(month):02d}"
 
 
-@app.callback(
-    Output("wiz-existing-panel", "style"),
-    Output("wiz-new-panel", "style"),
-    Input("wiz-customer-mode", "value"),
-)
-def _wiz_customer_mode(mode):
-    if mode == "new":
-        return {"display": "none"}, {"display": "block"}
-    return {"display": "block"}, {"display": "none"}
+def scan_catalog() -> pd.DataFrame:
+    global CATALOG_CACHE
+    if CATALOG_CACHE is not None:
+        return CATALOG_CACHE.copy()
 
+    rows: list[dict[str, Any]] = []
+    # Use Path() to ensure we have a Path object, then glob directly
+    # glob() will return an empty list if the path is invalid or empty
+    data_path = Path(DATA_FOLDER)
+    
+    # Use a more flexible regex to handle potential extra spaces
+    pattern = re.compile(r"^NOVA\s*-\s*(?P<country>.+?)\s*-\s*(?P<yyyymm>\d{6})$", re.IGNORECASE)
+    
+    for file_path in sorted(data_path.glob("*.parquet")):
+        # Ensure we are working with the filename without extension
+        match = pattern.match(file_path.stem)
+        if not match:
+            continue
+            
+        country = match.group("country").strip().upper()
+        yyyymm = match.group("yyyymm")
+        
+        try:
+            period_val = month_period_start(yyyymm)
+        except Exception:
+            continue
 
-@app.callback(
-    Output("wiz-customer-search", "options"),
-    Input("wiz-customer-search", "search_value"),
-    State("wiz-customer-search", "value"),
-)
-def _wiz_customer_search(search_value, current_value):
-    if OBLIGOR_PROFILES.empty:
-        return []
-    if not search_value:
-        idx = list(OBLIGOR_PROFILES.index[:25])
-    else:
-        s = str(search_value).strip().upper()
-        mask = OBLIGOR_PROFILES.index.astype(str).str.upper().str.contains(s, na=False, regex=False)
-        if "ARVAL_INDUSTRY_CODE_CLS_DESCRIPTION" in OBLIGOR_PROFILES.columns:
-            mask = mask | OBLIGOR_PROFILES["ARVAL_INDUSTRY_CODE_CLS_DESCRIPTION"].astype(str).str.upper().str.contains(s, na=False, regex=False)
-        idx = list(OBLIGOR_PROFILES.index[mask][:25])
-    if current_value and current_value not in idx:
-        idx = idx + [current_value]
-    opts = []
-    for oid in idx:
-        row = OBLIGOR_PROFILES.loc[oid]
-        opts.append({
-            "label": f"{oid} — {row.get('ARVAL_INDUSTRY_CODE_CLS_DESCRIPTION')} — rating {row.get('GROUP_RATING')}",
-            "value": oid,
-        })
-    return opts
-
-
-@app.callback(
-    Output("wiz-existing-info", "children"),
-    Input("wiz-customer-search", "value"),
-)
-def _wiz_existing_info(oid):
-    if not oid or oid not in OBLIGOR_PROFILES.index:
-        return html.P("Select a customer to see their profile.",
-                       style={"fontSize": "12px", "color": "#a0aec0", "fontStyle": "italic"})
-    row = OBLIGOR_PROFILES.loc[oid]
-
-    def _field(label, val):
-        return html.Div([
-            html.Span(label, style={"fontSize": "11px", "color": "#718096", "fontWeight": "700", "display": "block"}),
-            html.Span(str(val) if pd.notna(val) else "—", style={"fontSize": "13px", "color": "#1a1a2e", "fontWeight": "600"}),
-        ], style={"minWidth": "140px"})
-
-    return html.Div([
-        _field("Country", row.get("COUNTRY")),
-        _field("Industry", row.get("ARVAL_INDUSTRY_CODE_CLS_DESCRIPTION")),
-        _field("Group Rating", row.get("GROUP_RATING")),
-        _field("Counterparty Rating", row.get("COUNTERPARTY_RATING")),
-        _field("CLS Rating", row.get("CLS_GROUP_RATING")),
-        _field("Shared Client Flag", row.get("SHARED_CLIENT_FLAG")),
-    ], style={"display": "flex", "flexWrap": "wrap", "gap": "14px", "marginTop": "10px",
-              "padding": "12px", "background": "#f7fafc", "borderRadius": "6px"})
-
-
-@app.callback(
-    Output("wiz-summary", "children"),
-    Input("wiz-qty", "value"),
-    Input("wiz-brand", "value"),
-    Input("wiz-model", "value"),
-    Input("wiz-bodytype", "value"),
-    Input("wiz-power", "value"),
-    Input("wiz-co2", "value"),
-    Input("wiz-customer-mode", "value"),
-    Input("wiz-customer-search", "value"),
-    Input("wiz-new-industry", "value"),
-    Input("wiz-new-group-rating", "value"),
-    Input("wiz-new-cp-rating", "value"),
-    Input("wiz-new-cls-rating", "value"),
-    Input("wiz-new-shared-flag", "value"),
-    Input("wiz-price", "value"),
-)
-def _wiz_summary(qty, brand, model, bodytype, power, co2, cust_mode, cust_search,
-                  new_ind, new_gr, new_cr, new_cls, new_sf, price):
-    if not brand:
-        return html.P("Fill in the previous steps to see a summary here.",
-                       style={"fontSize": "12px", "color": "#a0aec0", "fontStyle": "italic"})
-
-    if cust_mode == "existing":
-        if cust_search and cust_search in OBLIGOR_PROFILES.index:
-            row = OBLIGOR_PROFILES.loc[cust_search]
-            industry, gr, cr, cls_r, sf = (
-                row.get("ARVAL_INDUSTRY_CODE_CLS_DESCRIPTION"), row.get("GROUP_RATING"),
-                row.get("COUNTERPARTY_RATING"), row.get("CLS_GROUP_RATING"), row.get("SHARED_CLIENT_FLAG"),
-            )
-            cust_label = f"existing customer {cust_search}"
-        else:
-            industry = gr = cr = cls_r = sf = None
-            cust_label = "existing customer (not selected yet)"
-    else:
-        industry, gr, cr, cls_r, sf = new_ind, new_gr, new_cr, new_cls, new_sf
-        cust_label = "new customer"
-
-    rating_txt = f"{gr or '—'} / {cr or '—'}"
-    if cls_r not in (None, ""):
-        rating_txt += f" / CLS {cls_r}"
-
-    parts = [
-        f"Power: {power or '—'}",
-        f"CO2 bucket: {co2 or '—'}",
-        f"Industry: {industry or '—'}",
-        f"Rating: {rating_txt}",
-        f"Shared flag: {sf or '—'}",
-        cust_label,
-        f"€{float(price):,.0f}/vehicle" if price else "price not set",
-    ]
-    headline = f"{int(qty) if qty else 0} × {brand}{' ' + model if model else ''}{' (' + bodytype + ')' if bodytype else ''}"
-    return html.Div([
-        html.Div(headline, style={"fontWeight": "700", "fontSize": "14px", "color": "#1a1a2e", "marginBottom": "6px"}),
-        html.Div(" · ".join(parts), style={"fontSize": "12px", "color": "#4a5568"}),
-    ], style={"padding": "14px", "background": "#f0fff4", "border": "1px solid #c6f6d5", "borderRadius": "6px"})
-
-
-# =============================================================================
-# Callbacks — Add Vehicles wizard: step visibility / navigation controller
-# =============================================================================
-
-@app.callback(
-    Output("wiz-step-0", "style"),
-    Output("wiz-step-1", "style"),
-    Output("wiz-step-2", "style"),
-    Output("wiz-step-3", "style"),
-    Output("wiz-step-4", "style"),
-    Output("wiz-step-indicator", "children"),
-    Output("wiz-btn-primary", "children"),
-    Output("wiz-btn-back", "style"),
-    Input("wiz-step-store", "data"),
-)
-def _wiz_step_visibility(step):
-    step = step or 0
-    styles = [{"display": "none"}] * 5
-    styles[step] = {"display": "block"}
-
-    dots = []
-    for i, label in enumerate(WIZ_STEP_LABELS):
-        active = i == step
-        done = i < step
-        color = "#3182ce" if active else ("#276749" if done else "#a0aec0")
-        dots.append(html.Span(
-            f"{i + 1}. {label}",
-            style={"fontSize": "11px", "fontWeight": "700" if active else "500",
-                   "color": color, "marginRight": "14px"},
-        ))
-    indicator = html.Div(dots, style={"display": "flex", "flexWrap": "wrap", "marginTop": "6px"})
-
-    primary_label = "Add to Batch" if step == 4 else "Next"
-    back_style = dict(SECONDARY_BTN_STYLE)
-    if step == 0:
-        back_style["visibility"] = "hidden"
-    return (*styles, indicator, primary_label, back_style)
-
-
-@app.callback(
-    Output("wiz-modal", "style"),
-    Output("wiz-step-store", "data"),
-    Output("batch-store", "data"),
-    Output("wiz-validation-msg", "children"),
-    Output("wiz-qty", "value"),
-    Output("wiz-brand", "value"),
-    Output("wiz-customer-mode", "value"),
-    Output("wiz-customer-search", "value"),
-    Output("wiz-new-industry", "value"),
-    Output("wiz-new-group-rating", "value"),
-    Output("wiz-new-cp-rating", "value"),
-    Output("wiz-new-cls-rating", "value"),
-    Output("wiz-new-shared-flag", "value"),
-    Input("btn-open-wizard", "n_clicks"),
-    Input("wiz-btn-back", "n_clicks"),
-    Input("wiz-btn-primary", "n_clicks"),
-    Input("wiz-btn-cancel", "n_clicks"),
-    State("wiz-step-store", "data"),
-    State("wiz-qty", "value"),
-    State("wiz-brand", "value"),
-    State("wiz-model", "value"),
-    State("wiz-bodytype", "value"),
-    State("wiz-power", "value"),
-    State("wiz-co2", "value"),
-    State("wiz-customer-mode", "value"),
-    State("wiz-customer-search", "value"),
-    State("wiz-new-industry", "value"),
-    State("wiz-new-group-rating", "value"),
-    State("wiz-new-cp-rating", "value"),
-    State("wiz-new-cls-rating", "value"),
-    State("wiz-new-shared-flag", "value"),
-    State("wiz-price", "value"),
-    State("wiz-exposure-ltr", "value"),
-    State("wiz-exposure-mtr", "value"),
-    State("f-country", "value"),
-    State("batch-store", "data"),
-    prevent_initial_call=True,
-)
-def _wiz_controller(open_n, back_n, primary_n, cancel_n, step,
-                     qty, brand, model, bodytype, power, co2,
-                     cust_mode, cust_search, new_ind, new_gr, new_cr, new_cls, new_sf,
-                     price, ltr, mtr, f_country, batch_data):
-    trig = callback_context.triggered[0]["prop_id"] if callback_context.triggered else ""
-    step = step or 0
-    batch_data = batch_data or []
-
-    no_reset = (no_update,) * 9
-    RESET_VALUES = (100, None, "existing", None, None, None, None, None, None)
-
-    if "btn-open-wizard" in trig:
-        return ({**MODAL_OVERLAY_STYLE, "display": "flex"}, 0, no_update, "", *RESET_VALUES)
-
-    if "wiz-btn-cancel" in trig:
-        return ({**MODAL_OVERLAY_STYLE, "display": "none"}, no_update, no_update, "", *no_reset)
-
-    if "wiz-btn-back" in trig:
-        return (no_update, max(0, step - 1), no_update, "", *no_reset)
-
-    if "wiz-btn-primary" in trig:
-        if step == 0:
-            if not qty or int(qty) <= 0 or not brand:
-                return (no_update, step, no_update,
-                         "Please enter a quantity greater than 0 and select a brand.", *no_reset)
-            return (no_update, 1, no_update, "", *no_reset)
-
-        if step == 1:
-            if not model or not bodytype:
-                return (no_update, step, no_update, "Please select a model and a body type.", *no_reset)
-            return (no_update, 2, no_update, "", *no_reset)
-
-        if step == 2:
-            if not power or not co2:
-                return (no_update, step, no_update, "Please select a power category and a CO2 bucket.", *no_reset)
-            return (no_update, 3, no_update, "", *no_reset)
-
-        if step == 3:
-            if cust_mode == "existing":
-                if not cust_search or cust_search not in OBLIGOR_PROFILES.index:
-                    return (no_update, step, no_update, "Please search and select an existing customer.", *no_reset)
-            else:
-                if not new_ind or not new_gr or not new_cr or not new_sf:
-                    return (no_update, step, no_update,
-                             "Please fill in industry, ratings and shared client flag for the new customer.", *no_reset)
-            return (no_update, 4, no_update, "", *no_reset)
-
-        if step == 4:
-            if not price or float(price) <= 0:
-                return (no_update, step, no_update, "Please enter a vehicle price greater than 0.", *no_reset)
-
-            ltr_v = float(ltr) if ltr not in (None, "") else 0.0
-            mtr_v = float(mtr) if mtr not in (None, "") else 0.0
-
-            if cust_mode == "existing":
-                row = OBLIGOR_PROFILES.loc[cust_search]
-                obligor_id   = cust_search
-                industry     = row.get("ARVAL_INDUSTRY_CODE_CLS_DESCRIPTION")
-                group_rating = row.get("GROUP_RATING")
-                cp_rating    = row.get("COUNTERPARTY_RATING")
-                cls_rating   = row.get("CLS_GROUP_RATING")
-                shared_flag  = row.get("SHARED_CLIENT_FLAG")
-                country      = row.get("COUNTRY")
-                cust_label   = f"existing customer {obligor_id}"
-            else:
-                _NEW_OBLIGOR_COUNTER["n"] += 1
-                base_country = f_country if f_country and f_country != "ALL" else (_countries_avail[0] if _countries_avail else "SPAIN")
-                obligor_id   = f"NEW-{str(base_country)[:3]}-{_NEW_OBLIGOR_COUNTER['n']:05d}"
-                industry, group_rating, cp_rating, shared_flag = new_ind, new_gr, new_cr, new_sf
-                cls_rating   = new_cls if new_cls not in (None, "") else None
-                country      = base_country
-                cust_label   = f"new customer {obligor_id}"
-
-            cls_display = f" / CLS {cls_rating}" if cls_rating not in (None, "") else ""
-            summary = (
-                f"{int(qty)} × {brand} {model} ({bodytype}) — {power}, CO2 {co2}, "
-                f"{industry}, rating {group_rating}/{cp_rating}{cls_display}, "
-                f"{cust_label}, €{float(price):,.0f}/vehicle"
-            )
-            entry = {
-                "qty": int(qty), "brand": brand, "model": model, "body_type": bodytype,
-                "power_category": power, "co2_bucket": co2,
-                "obligor_id": obligor_id, "industry": industry,
-                "group_rating": group_rating, "counterparty_rating": cp_rating,
-                "cls_rating": cls_rating, "shared_flag": shared_flag, "country": country,
-                "price": float(price), "exposure_ltr": ltr_v, "exposure_mtr": mtr_v,
-                "summary": summary,
+        rows.append(
+            {
+                "file_path": file_path,
+                "country": country,
+                "yyyymm": yyyymm,
+                "period": period_val,
             }
-            new_batch = batch_data + [entry]
-            return ({**MODAL_OVERLAY_STYLE, "display": "none"}, 0, new_batch, "", *RESET_VALUES)
-
-    return (no_update,) * 13
-
-
-# =============================================================================
-# Callbacks — Pending batch list
-# =============================================================================
-
-@app.callback(
-    Output("pending-batch-list", "children"),
-    Input("batch-store", "data"),
-)
-def _render_pending_batch(batch_data):
-    batch_data = batch_data or []
-    if not batch_data:
-        return html.P("No vehicles queued yet. Use “+ Add Vehicles” to define a batch.",
-                       style={"fontSize": "12px", "color": "#a0aec0", "fontStyle": "italic"})
-    rows = []
-    for i, entry in enumerate(batch_data):
-        rows.append(html.Div(
-            [
-                html.Div(entry["summary"], style={"fontSize": "13px", "color": "#1a1a2e", "flex": "1"}),
-                html.Button("Remove", id={"type": "batch-remove-btn", "index": i}, n_clicks=0, style=DANGER_BTN_STYLE),
-            ],
-            style={"display": "flex", "alignItems": "center", "gap": "12px", "padding": "10px 12px",
-                   "background": "#f7fafc", "borderRadius": "6px", "marginBottom": "8px",
-                   "border": "1px solid #e2e8f0"},
-        ))
-    return rows
-
-
-@app.callback(
-    Output("batch-store", "data", allow_duplicate=True),
-    Input({"type": "batch-remove-btn", "index": ALL}, "n_clicks"),
-    State("batch-store", "data"),
-    prevent_initial_call=True,
-)
-def _remove_batch_item(n_clicks_list, batch_data):
-    if not callback_context.triggered or not any(n_clicks_list or []):
-        return no_update
-    prop_id = callback_context.triggered[0]["prop_id"].rsplit(".", 1)[0]
-    try:
-        idx = json.loads(prop_id)["index"]
-    except Exception:
-        return no_update
-    batch_data = batch_data or []
-    return [e for i, e in enumerate(batch_data) if i != idx]
-
-
-# =============================================================================
-# Callbacks — Remove Vehicles wizard: cascading options
-# Each dropdown is scoped to the current dashboard filters/COB period plus every
-# field already picked earlier in the wizard, so it only ever offers choices that
-# leave at least one matching vehicle — never a combination showing "0 vehicles".
-# =============================================================================
-
-@app.callback(
-    Output("rwiz-brand", "options"),
-    Input("btn-open-remove-wizard", "n_clicks"),
-    State("f-country", "value"),
-    State("f-asset-status", "value"),
-    State("f-brand", "value"),
-    State("f-model", "value"),
-    State("f-bodytype", "value"),
-    State("cob-store", "data"),
-    prevent_initial_call=True,
-)
-def _rwiz_brand_options(_open, country, asset_status, brands_f, models_f, bodytypes_f, cob_store):
-    d = _rwiz_scoped_df(country, brands_f, models_f, bodytypes_f, asset_status, cob_store)
-    brands = _rwiz_valid_options(d, "BRAND_UPDATE", _RWIZ_FIELD_CHAIN[1:])
-    return [{"label": b, "value": b} for b in brands]
-
-
-@app.callback(
-    Output("rwiz-model", "options"),
-    Output("rwiz-model", "value"),
-    Input("rwiz-brand", "value"),
-    State("f-country", "value"),
-    State("f-asset-status", "value"),
-    State("f-brand", "value"),
-    State("f-model", "value"),
-    State("f-bodytype", "value"),
-    State("cob-store", "data"),
-    prevent_initial_call=True,
-)
-def _rwiz_model_options(brand, country, asset_status, brands_f, models_f, bodytypes_f, cob_store):
-    if not brand:
-        return [], None
-    d = _rwiz_scoped_df(country, brands_f, models_f, bodytypes_f, asset_status, cob_store, brand)
-    models = _rwiz_valid_options(d, "MARKET_MODEL", _RWIZ_FIELD_CHAIN[2:])
-    return [{"label": m, "value": m} for m in models], None
-
-
-@app.callback(
-    Output("rwiz-bodytype", "options"),
-    Output("rwiz-bodytype", "value"),
-    Input("rwiz-brand", "value"),
-    Input("rwiz-model", "value"),
-    State("f-country", "value"),
-    State("f-asset-status", "value"),
-    State("f-brand", "value"),
-    State("f-model", "value"),
-    State("f-bodytype", "value"),
-    State("cob-store", "data"),
-    prevent_initial_call=True,
-)
-def _rwiz_bodytype_options(brand, model, country, asset_status, brands_f, models_f, bodytypes_f, cob_store):
-    if not brand:
-        return [], None
-    d = _rwiz_scoped_df(country, brands_f, models_f, bodytypes_f, asset_status, cob_store, brand, model)
-    btypes = _rwiz_valid_options(d, "MARKET_BODY_GROUP", _RWIZ_FIELD_CHAIN[3:])
-    return [{"label": b, "value": b} for b in btypes], None
-
-
-@app.callback(
-    Output("rwiz-power", "options"),
-    Output("rwiz-power", "value"),
-    Input("rwiz-brand", "value"),
-    Input("rwiz-model", "value"),
-    Input("rwiz-bodytype", "value"),
-    State("f-country", "value"),
-    State("f-asset-status", "value"),
-    State("f-brand", "value"),
-    State("f-model", "value"),
-    State("f-bodytype", "value"),
-    State("cob-store", "data"),
-    prevent_initial_call=True,
-)
-def _rwiz_power_options(brand, model, bodytype, country, asset_status, brands_f, models_f, bodytypes_f, cob_store):
-    if not brand:
-        return [], None
-    d = _rwiz_scoped_df(country, brands_f, models_f, bodytypes_f, asset_status, cob_store, brand, model, bodytype)
-    powers = _rwiz_valid_options(d, "POWER_CATEGORY", _RWIZ_FIELD_CHAIN[4:])
-    return [{"label": p, "value": p} for p in powers], None
-
-
-@app.callback(
-    Output("rwiz-co2", "options"),
-    Output("rwiz-co2", "value"),
-    Input("rwiz-brand", "value"),
-    Input("rwiz-model", "value"),
-    Input("rwiz-bodytype", "value"),
-    Input("rwiz-power", "value"),
-    State("f-country", "value"),
-    State("f-asset-status", "value"),
-    State("f-brand", "value"),
-    State("f-model", "value"),
-    State("f-bodytype", "value"),
-    State("cob-store", "data"),
-    prevent_initial_call=True,
-)
-def _rwiz_co2_options(brand, model, bodytype, power, country, asset_status, brands_f, models_f, bodytypes_f, cob_store):
-    if not brand:
-        return [], None
-    d = _rwiz_scoped_df(country, brands_f, models_f, bodytypes_f, asset_status, cob_store, brand, model, bodytype, power)
-    co2s = sorted(d["CO2_BUCKET"].dropna().unique().tolist(), key=_co2_bucket_low) if "CO2_BUCKET" in d.columns else []
-    return [{"label": c, "value": c} for c in co2s], None
-
-
-@app.callback(
-    Output("rwiz-count", "children"),
-    Input("rwiz-brand", "value"),
-    Input("rwiz-model", "value"),
-    Input("rwiz-bodytype", "value"),
-    Input("rwiz-power", "value"),
-    Input("rwiz-co2", "value"),
-    Input("btn-open-remove-wizard", "n_clicks"),
-    State("f-country", "value"),
-    State("f-asset-status", "value"),
-    State("f-brand", "value"),
-    State("f-model", "value"),
-    State("f-bodytype", "value"),
-    State("cob-store", "data"),
-)
-def _rwiz_count(brand, model, bodytype, power, co2, _open,
-                country, asset_status, brands_f, models_f, bodytypes_f, cob_store):
-    if not brand:
-        return "Select a brand to see how many vehicles match your selection."
-    n = count_matching_for_removal(country, brands_f, models_f, bodytypes_f, asset_status, cob_store,
-                                    brand, model, bodytype, power, co2)
-    return f"{n:,} vehicle{'s' if n != 1 else ''} match this selection."
-
-
-@app.callback(
-    Output("rwiz-qty", "value", allow_duplicate=True),
-    Output("rwiz-qty", "max"),
-    Input("rwiz-brand", "value"),
-    Input("rwiz-model", "value"),
-    Input("rwiz-bodytype", "value"),
-    Input("rwiz-power", "value"),
-    Input("rwiz-co2", "value"),
-    State("f-country", "value"),
-    State("f-asset-status", "value"),
-    State("f-brand", "value"),
-    State("f-model", "value"),
-    State("f-bodytype", "value"),
-    State("cob-store", "data"),
-    prevent_initial_call=True,
-)
-def _rwiz_qty_bounds(brand, model, bodytype, power, co2,
-                      country, asset_status, brands_f, models_f, bodytypes_f, cob_store):
-    """The quantity field is only asked once the full filter combination is set —
-    it defaults to (and is capped at) the number of vehicles actually available for
-    that combination, so the user can never type more than what exists."""
-    if not brand:
-        return None, None
-    available = count_matching_for_removal(country, brands_f, models_f, bodytypes_f, asset_status, cob_store,
-                                            brand, model, bodytype, power, co2)
-    return (available, available) if available > 0 else (None, None)
-
-
-# =============================================================================
-# Callbacks — Remove Vehicles wizard: step visibility / navigation controller
-# =============================================================================
-
-@app.callback(
-    Output("rwiz-step-0", "style"),
-    Output("rwiz-step-1", "style"),
-    Output("rwiz-step-2", "style"),
-    Output("rwiz-step-3", "style"),
-    Output("rwiz-step-indicator", "children"),
-    Output("rwiz-btn-primary", "children"),
-    Output("rwiz-btn-back", "style"),
-    Input("rwiz-step-store", "data"),
-)
-def _rwiz_step_visibility(step):
-    step = step or 0
-    styles = [{"display": "none"}] * 4
-    styles[step] = {"display": "block"}
-
-    dots = []
-    for i, label in enumerate(REMOVE_WIZ_STEP_LABELS):
-        active = i == step
-        done = i < step
-        color = "#c53030" if active else ("#276749" if done else "#a0aec0")
-        dots.append(html.Span(
-            f"{i + 1}. {label}",
-            style={"fontSize": "11px", "fontWeight": "700" if active else "500",
-                   "color": color, "marginRight": "14px"},
-        ))
-    indicator = html.Div(dots, style={"display": "flex", "flexWrap": "wrap", "marginTop": "6px"})
-
-    primary_label = "Remove" if step == 3 else "Next"
-    back_style = dict(SECONDARY_BTN_STYLE)
-    if step == 0:
-        back_style["visibility"] = "hidden"
-    return (*styles, indicator, primary_label, back_style)
-
-
-@app.callback(
-    Output("rwiz-modal", "style"),
-    Output("rwiz-step-store", "data"),
-    Output("remove-batch-store", "data"),
-    Output("rwiz-validation-msg", "children"),
-    Output("rwiz-qty", "value"),
-    Output("rwiz-brand", "value"),
-    Input("btn-open-remove-wizard", "n_clicks"),
-    Input("rwiz-btn-back", "n_clicks"),
-    Input("rwiz-btn-primary", "n_clicks"),
-    Input("rwiz-btn-cancel", "n_clicks"),
-    State("rwiz-step-store", "data"),
-    State("rwiz-qty", "value"),
-    State("rwiz-brand", "value"),
-    State("rwiz-model", "value"),
-    State("rwiz-bodytype", "value"),
-    State("rwiz-power", "value"),
-    State("rwiz-co2", "value"),
-    State("f-country", "value"),
-    State("f-asset-status", "value"),
-    State("f-brand", "value"),
-    State("f-model", "value"),
-    State("f-bodytype", "value"),
-    State("cob-store", "data"),
-    State("remove-batch-store", "data"),
-    prevent_initial_call=True,
-)
-def _rwiz_controller(open_n, back_n, primary_n, cancel_n, step,
-                      qty, brand, model, bodytype, power, co2,
-                      country, asset_status, brands_f, models_f, bodytypes_f, cob_store, removal_data):
-    trig = callback_context.triggered[0]["prop_id"] if callback_context.triggered else ""
-    step = step or 0
-    removal_data = removal_data or []
-
-    no_reset = (no_update, no_update)
-    RESET_VALUES = (None, None)
-
-    if "btn-open-remove-wizard" in trig:
-        return ({**MODAL_OVERLAY_STYLE, "display": "flex"}, 0, no_update, "", *RESET_VALUES)
-
-    if "rwiz-btn-cancel" in trig:
-        return ({**MODAL_OVERLAY_STYLE, "display": "none"}, no_update, no_update, "", *no_reset)
-
-    if "rwiz-btn-back" in trig:
-        return (no_update, max(0, step - 1), no_update, "", *no_reset)
-
-    if "rwiz-btn-primary" in trig:
-        if step == 0:
-            if not brand:
-                return (no_update, step, no_update, "Please select a brand.", *no_reset)
-            return (no_update, 1, no_update, "", *no_reset)
-
-        if step == 1:
-            if not model or not bodytype:
-                return (no_update, step, no_update, "Please select a model and a body type.", *no_reset)
-            return (no_update, 2, no_update, "", *no_reset)
-
-        if step == 2:
-            if not power or not co2:
-                return (no_update, step, no_update, "Please select a power category and a CO2 bucket.", *no_reset)
-            return (no_update, 3, no_update, "", *no_reset)
-
-        if step == 3:
-            if not qty or int(qty) <= 0:
-                return (no_update, step, no_update, "Please enter a quantity greater than 0.", *no_reset)
-            available = count_matching_for_removal(country, brands_f, models_f, bodytypes_f, asset_status, cob_store,
-                                                     brand, model, bodytype, power, co2)
-            if int(qty) > available:
-                return (no_update, step, no_update,
-                         f"Only {available:,} vehicle{'s' if available != 1 else ''} match this selection.", *no_reset)
-
-            summary = f"−{int(qty)} × {brand} {model} ({bodytype}) — {power}, CO2 {co2}"
-            entry = {
-                "qty": int(qty), "brand": brand, "model": model, "body_type": bodytype,
-                "power_category": power, "co2_bucket": co2, "summary": summary,
-            }
-            new_removals = removal_data + [entry]
-            return ({**MODAL_OVERLAY_STYLE, "display": "none"}, 0, new_removals, "", *RESET_VALUES)
-
-    return (no_update,) * 6
-
-
-@app.callback(
-    Output("rwiz-summary", "children"),
-    Input("rwiz-qty", "value"),
-    Input("rwiz-brand", "value"),
-    Input("rwiz-model", "value"),
-    Input("rwiz-bodytype", "value"),
-    Input("rwiz-power", "value"),
-    Input("rwiz-co2", "value"),
-)
-def _rwiz_summary(qty, brand, model, bodytype, power, co2):
-    if not brand:
-        return html.P("Fill in the previous steps to see a summary here.",
-                       style={"fontSize": "12px", "color": "#a0aec0", "fontStyle": "italic"})
-    headline = f"{int(qty) if qty else 0} × {brand}{' ' + model if model else ''}{' (' + bodytype + ')' if bodytype else ''}"
-    parts = [f"Power: {power or '—'}", f"CO2 bucket: {co2 or '—'}"]
-    return html.Div([
-        html.Div(headline, style={"fontWeight": "700", "fontSize": "14px", "color": "#1a1a2e", "marginBottom": "6px"}),
-        html.Div(" · ".join(parts), style={"fontSize": "12px", "color": "#4a5568"}),
-    ], style={"padding": "14px", "background": "#fff5f5", "border": "1px solid #fed7d7", "borderRadius": "6px"})
-
-
-# =============================================================================
-# Callbacks — Pending removals list
-# =============================================================================
-
-@app.callback(
-    Output("pending-removal-list", "children"),
-    Input("remove-batch-store", "data"),
-)
-def _render_pending_removals(removal_data):
-    removal_data = removal_data or []
-    if not removal_data:
-        return html.P("No removals queued yet. Use “− Remove Vehicles” to define one.",
-                       style={"fontSize": "12px", "color": "#a0aec0", "fontStyle": "italic"})
-    rows = []
-    for i, entry in enumerate(removal_data):
-        rows.append(html.Div(
-            [
-                html.Div(entry["summary"], style={"fontSize": "13px", "color": "#1a1a2e", "flex": "1"}),
-                html.Button("Remove", id={"type": "removal-remove-btn", "index": i}, n_clicks=0, style=DANGER_BTN_STYLE),
-            ],
-            style={"display": "flex", "alignItems": "center", "gap": "12px", "padding": "10px 12px",
-                   "background": "#f7fafc", "borderRadius": "6px", "marginBottom": "8px",
-                   "border": "1px solid #e2e8f0"},
-        ))
-    return rows
-
-
-@app.callback(
-    Output("remove-batch-store", "data", allow_duplicate=True),
-    Input({"type": "removal-remove-btn", "index": ALL}, "n_clicks"),
-    State("remove-batch-store", "data"),
-    prevent_initial_call=True,
-)
-def _remove_removal_item(n_clicks_list, removal_data):
-    if not callback_context.triggered or not any(n_clicks_list or []):
-        return no_update
-    prop_id = callback_context.triggered[0]["prop_id"].rsplit(".", 1)[0]
-    try:
-        idx = json.loads(prop_id)["index"]
-    except Exception:
-        return no_update
-    removal_data = removal_data or []
-    return [e for i, e in enumerate(removal_data) if i != idx]
-
-
-# =============================================================================
-# Callbacks — Run / Reset simulation
-# =============================================================================
-
-@app.callback(
-    Output("sim-result", "children"),
-    Output("batch-store", "data", allow_duplicate=True),
-    Output("remove-batch-store", "data", allow_duplicate=True),
-    Input("btn-sim-run",   "n_clicks"),
-    Input("btn-sim-reset", "n_clicks"),
-    State("batch-store",  "data"),
-    State("remove-batch-store", "data"),
-    State("f-country",    "value"),
-    State("f-asset-status", "value"),
-    State("f-brand",      "value"),
-    State("f-model",      "value"),
-    State("f-bodytype",   "value"),
-    State("f-y",          "value"),
-    State("f-x",          "value"),
-    State("f-metric",     "value"),
-    State("page-store",   "data"),
-    State("cob-store",    "data"),
-    prevent_initial_call=True,
-)
-def _sim_result(run, reset, batch_data, removal_data,
-                country, asset_status, brands, models, bodytypes, y_col, x_col, metric,
-                page, cob_store):
-    trig = callback_context.triggered[0]["prop_id"] if callback_context.triggered else ""
-    if "reset" in trig:
-        return [], [], []
-
-    batch_data = batch_data or []
-    removal_data = removal_data or []
-
-    y_col  = y_col  or "BRAND_UPDATE"
-    x_col  = x_col  or "GROUP_RATING"
-    metric = metric or "volume"
-    page   = page or 0
-    cob    = cob_store or {}
-
-    d_orig = apply_filters(country, brands, models, bodytypes, asset_status)
-    d_orig = apply_cob_filter(d_orig, cob.get("granularity", "monthly"), cob.get("period") or "")
-
-    if d_orig.empty and not batch_data:
-        return html.P("No data.", style={"color": "#999", "padding": "20px", "textAlign": "center"}), no_update, no_update
-
-    d_sim = apply_removal_batches(d_orig, removal_data)
-
-    cob_date = resolve_cob_date(cob)
-    if "ID_CONTRACT" in UC1_DF.columns and not UC1_DF.empty:
-        start_id = int(pd.to_numeric(UC1_DF["ID_CONTRACT"], errors="coerce").max() or 0) + 1
-    else:
-        start_id = 900000
-
-    synth_parts = []
-    for entry in batch_data:
-        part = build_synthetic_vehicles(entry, cob_date, start_id)
-        start_id += entry["qty"]
-        synth_parts.append(part)
-    if synth_parts:
-        d_sim = pd.concat([d_sim] + synth_parts, ignore_index=True)
-
-    piv_orig  = build_pivot(d_orig, y_col, x_col, metric)
-    piv_sim   = build_pivot(d_sim,  y_col, x_col, metric)
-    all_cols  = _ordered_axis(set(piv_orig.columns) | set(piv_sim.columns), x_col, is_y=False)
-    all_idx   = _ordered_axis(set(piv_orig.index)   | set(piv_sim.index),   y_col, is_y=True)
-    piv_orig  = piv_orig.reindex(index=all_idx, columns=all_cols, fill_value=0)
-    piv_sim   = piv_sim.reindex( index=all_idx, columns=all_cols, fill_value=0)
-    piv_delta = piv_sim - piv_orig
-
-    m_lbl     = _lbl(METRIC_OPTIONS, metric)
-    fig_orig  = make_heatmap_fig(piv_orig,  f"Original — {m_lbl}",  "Blues", page, show_totals=True)
-    fig_sim   = make_heatmap_fig(piv_sim,   f"Simulated — {m_lbl}", "BuGn",  page, show_totals=True)
-
-    paged_d = piv_delta.iloc[page * PAGE_SIZE: (page + 1) * PAGE_SIZE]
-    if not paged_d.empty:
-        # Normalize color contrast to what's actually visible on this page — using the
-        # full matrix's max here would wash out real on-page changes when a much larger
-        # change exists elsewhere (off-page).
-        abs_max = max(abs(float(paged_d.values.max())), abs(float(paged_d.values.min())), 1.0)
-        text_d  = [[_fmt_val(v, sign=True) for v in row] for row in paged_d.values]
-        fig_delta = go.Figure(go.Heatmap(
-            z=paged_d.values.tolist(),
-            x=[str(c) for c in paged_d.columns],
-            y=[str(r) for r in paged_d.index],
-            text=text_d, texttemplate="%{text}",
-            colorscale="RdYlGn", zmid=0, zmin=-abs_max, zmax=abs_max,
-            hoverongaps=False,
-            hovertemplate="%{y} × %{x}: %{z:+.1f}<extra></extra>",
-        ))
-        fig_delta.update_layout(
-            title={"text": f"Delta (Simulated − Original) — {m_lbl}",
-                   "font": {"size": 13, "color": "#1a1a2e"}, "x": 0.01},
-            margin={"l": 10, "r": 10, "t": 50, "b": 85},
-            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            font={"family": "Inter, sans-serif", "size": 11},
-            height=max(300, 60 + 28 * len(paged_d)),
-            xaxis={"tickangle": -40, "tickfont": {"size": 10}},
-            yaxis={"tickfont": {"size": 10}},
         )
-    else:
-        fig_delta = go.Figure()
-        fig_delta.add_annotation(text="No delta", showarrow=False)
-        fig_delta.update_layout(height=200, paper_bgcolor="rgba(0,0,0,0)")
 
-    CARD = {"background": "#ffffff", "borderRadius": "8px",
-            "border": "1px solid #e2e8f0", "padding": "16px",
-            "flex": "1", "minWidth": "0"}
+    catalog = pd.DataFrame(rows, columns=["file_path", "country", "yyyymm", "period"])
+    if not catalog.empty:
+        catalog = catalog.sort_values(["country", "yyyymm"]).reset_index(drop=True)
+    CATALOG_CACHE = catalog
+    return catalog.copy()
 
-    caption_parts = [e["summary"] for e in batch_data]
-    removed_parts = [e["summary"] for e in removal_data]
-    caption_bits  = caption_parts + removed_parts
-    caption = " | ".join(caption_bits) if caption_bits else "No changes queued — showing current portfolio only."
 
-    result = html.Div([
-        html.Div("Simulation Results",
-                 style={"fontWeight": "700", "fontSize": "14px", "color": "#1a1a2e",
-                        "margin": "0 0 6px"}),
-        html.Div(caption, style={"fontSize": "12px", "color": "#4a5568", "margin": "0 0 12px"}),
-        html.Div(
+def available_country_options(catalog: pd.DataFrame) -> list[dict[str, str]]:
+    countries = sorted(catalog["country"].dropna().astype(str).unique().tolist()) if not catalog.empty else []
+    return [{"label": country.title(), "value": country} for country in countries]
+
+
+def available_date_bounds(catalog: pd.DataFrame) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
+    if catalog.empty:
+        return None, None
+    return catalog["period"].min(), catalog["period"].max()
+
+
+def discover_available_load_columns(catalog: pd.DataFrame) -> list[str]:
+    if catalog.empty or "file_path" not in catalog.columns:
+        return []
+
+    sample_row = catalog.sample(n=1, random_state=42).iloc[0]
+    sample_path = Path(sample_row["file_path"])
+
+    try:
+        sample_df = pd.read_parquet(sample_path).head(1)
+        return [str(column) for column in sample_df.columns.tolist()]
+    except Exception:
+        return []
+
+
+def load_selected_data(
+    countries: list[str],
+    start_date: str | None,
+    end_date: str | None,
+    sample_pct: float = DEFAULT_LOAD_SAMPLE_PCT,
+    selected_columns: list[str] | None = None,
+) -> pd.DataFrame:
+    catalog = scan_catalog()
+    if catalog.empty:
+        raise FileNotFoundError(f"Aucun parquet trouvé dans {DATA_FOLDER}")
+
+    selected = catalog.copy()
+    countries_norm = {normalize_text(country) for country in countries if country}
+    if countries_norm:
+        selected = selected[selected["country"].isin(countries_norm)]
+
+    if start_date:
+        selected = selected[selected["period"] >= pd.to_datetime(start_date)]
+    if end_date:
+        selected = selected[selected["period"] <= pd.to_datetime(end_date)]
+
+    if selected.empty:
+        raise ValueError("Aucun fichier ne correspond aux filtres pays / dates.")
+
+    safe_sample_pct = float(sample_pct if sample_pct is not None else DEFAULT_LOAD_SAMPLE_PCT)
+    safe_sample_pct = min(100.0, max(0.0, safe_sample_pct))
+    sample_frac = safe_sample_pct / 100.0
+    selected_columns_clean = [str(column) for column in (selected_columns or []) if str(column).strip()]
+
+    frames: list[pd.DataFrame] = []
+    for idx, file_path in enumerate(selected["file_path"].tolist()):
+        if selected_columns_clean:
+            try:
+                frame = pd.read_parquet(file_path, columns=selected_columns_clean)
+            except Exception:
+                frame = pd.read_parquet(file_path)
+                available_cols = [column for column in selected_columns_clean if column in frame.columns]
+                frame = frame[available_cols] if available_cols else frame.iloc[:, 0:0]
+        else:
+            frame = pd.read_parquet(file_path)
+
+        if sample_frac < 1.0 and not frame.empty:
+            keep_rows = max(1, int(np.floor(len(frame) * sample_frac)))
+            frame = frame.sample(n=min(keep_rows, len(frame)), random_state=42 + idx)
+        frames.append(frame)
+
+    df = pd.concat(frames, ignore_index=True)
+    return prepare_dataframe(df)
+
+
+def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+
+    date_candidates = [
+        "COB_DATE",
+        "CONTRACT_START_DATE",
+        "CONTRACT_END_DATE",
+        "CONTRACT_END_DATE_AMENDED",
+        "EXTENSION_DATE",
+        "DATE_OF_ORDER",
+        "CONTRACT_FINAL_END",
+    ]
+    for column in date_candidates:
+        if column in out.columns:
+            out[column] = pd.to_datetime(out[column], errors="coerce")
+
+    if "COB_DATE" in out.columns:
+        out["COB_YEAR"] = out["COB_DATE"].dt.year
+        out["COB_MONTH"] = out["COB_DATE"].dt.month
+        out["COB_QUARTER"] = "Q" + out["COB_DATE"].dt.quarter.astype("Int64").astype(str)
+
+    if "CONTRACT_START_DATE" in out.columns:
+        out["CONTRACT_START_YEAR"] = out["CONTRACT_START_DATE"].dt.year
+        out["CONTRACT_START_MONTH"] = out["CONTRACT_START_DATE"].dt.month
+
+    for column in out.columns:
+        if pd.api.types.is_object_dtype(out[column]) or pd.api.types.is_string_dtype(out[column]):
+            out[column] = out[column].astype(str)
+
+    return out
+
+
+def infer_column_kind(df: pd.DataFrame, column: str) -> str:
+    if column not in df.columns:
+        return "unknown"
+    series = df[column]
+    upper = column.upper()
+    if upper in COB_TEMPORAL_COLUMNS:
+        return "date"
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return "date"
+    if pd.api.types.is_numeric_dtype(series):
+        return "numeric"
+    # Avoid false positives like BRAND_UPDATE / OEM_UPDATE (which end with "DATE" in UPDATE).
+    if upper.endswith("_DATE") or upper.endswith("_DT"):
+        return "date"
+    return "categorical"
+
+
+def coerce_temporal_series(df: pd.DataFrame, column: str) -> pd.Series:
+    if column not in df.columns:
+        return pd.Series(dtype="datetime64[ns]")
+
+    base = df[column]
+    if pd.api.types.is_datetime64_any_dtype(base):
+        return pd.to_datetime(base, errors="coerce")
+
+    upper = column.upper()
+    if upper == "COB_DATE":
+        return pd.to_datetime(df[column], errors="coerce")
+
+    if upper == "COB_YEAR":
+        year = pd.to_numeric(df[column], errors="coerce")
+        return pd.to_datetime({"year": year, "month": 1, "day": 1}, errors="coerce")
+
+    if upper == "COB_MONTH":
+        month = pd.to_numeric(df[column], errors="coerce")
+        if "COB_YEAR" in df.columns:
+            year = pd.to_numeric(df["COB_YEAR"], errors="coerce")
+        elif "COB_DATE" in df.columns:
+            year = pd.to_datetime(df["COB_DATE"], errors="coerce").dt.year
+        else:
+            year = pd.Series(2000, index=df.index)
+        return pd.to_datetime({"year": year, "month": month, "day": 1}, errors="coerce")
+
+    if upper == "COB_QUARTER":
+        quarter = (
+            df[column]
+            .astype(str)
+            .str.extract(r"(\d+)", expand=False)
+            .pipe(pd.to_numeric, errors="coerce")
+        )
+        month = (quarter - 1) * 3 + 1
+        if "COB_YEAR" in df.columns:
+            year = pd.to_numeric(df["COB_YEAR"], errors="coerce")
+        elif "COB_DATE" in df.columns:
+            year = pd.to_datetime(df["COB_DATE"], errors="coerce").dt.year
+        else:
+            year = pd.Series(2000, index=df.index)
+        return pd.to_datetime({"year": year, "month": month, "day": 1}, errors="coerce")
+
+    return pd.to_datetime(df[column], errors="coerce")
+
+
+def temporal_period_labels(df: pd.DataFrame, date_col: str) -> pd.Series:
+    upper = date_col.upper()
+    if upper == "COB_YEAR":
+        dt = coerce_temporal_series(df, date_col)
+        return dt.dt.to_period("Y").astype(str)
+    if upper == "COB_QUARTER":
+        return df[date_col].astype(str).astype(object)
+    if upper == "COB_MONTH":
+        month_num = df[date_col].astype(str).str.zfill(2)
+        return ("M" + month_num).astype(object)
+    dt = coerce_temporal_series(df, date_col)
+    return dt.dt.to_period("M").astype(str)
+
+
+def get_column_choices(df: pd.DataFrame) -> list[dict[str, str]]:
+    return [{"label": column, "value": column} for column in df.columns]
+
+
+def top_categories(series: pd.Series, limit: int = MAX_TOP_CATEGORIES) -> pd.Series:
+    counts = series.fillna("<NA>").astype(str).value_counts(dropna=False)
+    if len(counts) <= limit:
+        return series.fillna("<NA>").astype(str)
+    top_values = set(counts.head(limit).index.tolist())
+    return series.fillna("<NA>").astype(str).where(series.fillna("<NA>").astype(str).isin(top_values), other="OTHER")
+
+
+def sample_dataframe(df: pd.DataFrame, max_rows: int = MAX_PLOT_ROWS) -> pd.DataFrame:
+    if len(df) <= max_rows:
+        return df
+    return df.sample(max_rows, random_state=42)
+
+
+def month_grain_series(series: pd.Series, grain: str) -> pd.Series:
+    values = pd.to_datetime(series, errors="coerce")
+    if grain == "monthly":
+        return values.dt.to_period("M").astype(str)
+    if grain == "quarterly":
+        return values.dt.to_period("Q").astype(str)
+    return values.dt.year.astype("Int64").astype(str)
+
+
+def build_empty_figure(message: str) -> go.Figure:
+    fig = go.Figure()
+    fig.add_annotation(text=message, x=0.5, y=0.5, xref="paper", yref="paper", showarrow=False, font={"size": 16})
+    fig.update_layout(template="plotly_white", height=420, margin={"l": 30, "r": 30, "t": 40, "b": 30})
+    return fig
+
+
+def build_beautiful_table(df: pd.DataFrame, page_size: int = 20) -> dash_table.DataTable:
+    if df.empty:
+        return dash_table.DataTable(data=[], columns=[])
+        
+    columns = []
+    for column in df.columns:
+        columns.append(
+            {
+                "name": column,
+                "id": column,
+                "type": "numeric" if pd.api.types.is_numeric_dtype(df[column]) else "text",
+            }
+        )
+
+    return dash_table.DataTable(
+        data=df.to_dict("records"),
+        columns=columns,
+        page_size=page_size,
+        sort_action="native",
+        filter_action="native",
+        style_table={
+            "overflowX": "auto",
+            "border": "1px solid #E2E8F0",
+            "borderRadius": "8px",
+            "boxShadow": "0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)",
+        },
+        style_cell={
+            "minWidth": "120px",
+            "maxWidth": "250px",
+            "whiteSpace": "nowrap",
+            "overflow": "hidden",
+            "textOverflow": "ellipsis",
+            "fontFamily": "'Inter', 'Segoe UI', sans-serif",
+            "fontSize": "14px",
+            "padding": "14px 16px",
+            "borderBottom": "1px solid #E2E8F0",
+            "borderRight": "none",
+            "borderLeft": "none",
+            "borderTop": "none",
+            "textAlign": "left",
+            "color": "#1E293B",
+            "backgroundColor": "white",
+        },
+        style_header={
+            "fontWeight": "600",
+            "backgroundColor": "#F8FAFC",
+            "color": "#475569",
+            "textTransform": "uppercase",
+            "fontSize": "12px",
+            "letterSpacing": "0.05em",
+            "borderBottom": "2px solid #E2E8F0",
+            "borderTop": "none",
+        },
+        style_data_conditional=[
+            {
+                "if": {"row_index": "odd"},
+                "backgroundColor": "#F1F5F9",
+            },
+            {
+                "if": {"state": "selected"},
+                "backgroundColor": "#E0F2FE",
+                "border": "1px solid #BAE6FD",
+            },
+            {
+                "if": {"state": "active"},
+                "backgroundColor": "#E0F2FE",
+                "border": "1px solid #BAE6FD",
+            }
+        ],
+    )
+
+
+def build_preview_table(df: pd.DataFrame, max_rows: int = 100) -> dash_table.DataTable:
+    preview = df.head(max_rows).copy()
+    return build_beautiful_table(preview, page_size=min(max_rows, 20))
+
+
+def advanced_operator_options(kind: str) -> list[dict[str, str]]:
+    if kind == "numeric":
+        return [
+            {"label": "Equals", "value": "equals"},
+            {"label": "Greater than", "value": ">"},
+            {"label": "Greater than or equal", "value": ">="},
+            {"label": "Less than", "value": "<"},
+            {"label": "Less than or equal", "value": "<="},
+        ]
+    if kind == "date":
+        return [
+            {"label": "After", "value": "after"},
+            {"label": "Before", "value": "before"},
+            {"label": "Between", "value": "between"},
+            {"label": "Equals", "value": "equals"},
+        ]
+    return [
+        {"label": "Equals", "value": "equals"},
+        {"label": "Contains", "value": "contains"},
+        {"label": "Starts with", "value": "starts with"},
+        {"label": "Ends with", "value": "ends with"},
+    ]
+
+
+def build_advanced_value_widget(row_index: int, df: pd.DataFrame, column: str | None, operator: str | None) -> html.Div:
+    if not column or column not in df.columns:
+        return html.Div("Choisis une colonne pour activer le filtre.", className="filter-helper")
+
+    kind = infer_column_kind(df, column)
+    operator = (operator or "").lower()
+
+    if kind == "numeric":
+        numeric = pd.to_numeric(df[column], errors="coerce").dropna()
+        if numeric.empty:
+            return html.Div("Aucune valeur numérique exploitable.", className="filter-helper")
+        min_v = float(numeric.min())
+        max_v = float(numeric.max())
+        return html.Div(
             [
-                html.Div([dcc.Graph(figure=fig_orig,  config={"displayModeBar": False})], style=CARD),
-                html.Div([dcc.Graph(figure=fig_sim,   config={"displayModeBar": False})], style=CARD),
+                dcc.Input(
+                    id={"type": "adv-num-value", "row": row_index},
+                    type="number",
+                    placeholder="Valeur",
+                    debounce=True,
+                    className="advanced-input",
+                    persistence=True,
+                    persistence_type="memory",
+                ),
+                html.Div(f"Plage disponible: {min_v:.2f} → {max_v:.2f}", className="filter-helper"),
+            ]
+        )
+
+    if kind == "date":
+        date_series = pd.to_datetime(df[column], errors="coerce").dropna()
+        if date_series.empty:
+            return html.Div("Aucune date exploitable.", className="filter-helper")
+        year_values = sorted(int(year) for year in date_series.dt.year.dropna().unique())
+        year_options = [{"label": str(year), "value": year} for year in year_values]
+        if operator == "between":
+            return build_month_year_range_block(
+                start_year_id={"type": "adv-date-start-year", "row": row_index},
+                start_month_id={"type": "adv-date-start-month", "row": row_index},
+                end_year_id={"type": "adv-date-end-year", "row": row_index},
+                end_month_id={"type": "adv-date-end-month", "row": row_index},
+                year_options=year_options,
+                start_year_value=None,
+                start_month_value=None,
+                end_year_value=None,
+                end_month_value=None,
+            )
+        day_options = [{"label": f"{d:02d}", "value": d} for d in range(1, 32)]
+        date_inputs = [
+            dcc.Dropdown(
+                id={"type": "adv-date-year", "row": row_index},
+                options=year_options,
+                value=None,
+                placeholder="Année",
+                clearable=True,
+                persistence=True,
+                persistence_type="memory",
+            ),
+            dcc.Dropdown(
+                id={"type": "adv-date-month", "row": row_index},
+                options=MONTH_OPTIONS,
+                value=None,
+                placeholder="Mois",
+                clearable=True,
+                persistence=True,
+                persistence_type="memory",
+            ),
+        ]
+        
+        if operator == "equals":
+            date_inputs.append(
+                dcc.Dropdown(
+                    id={"type": "adv-date-day", "row": row_index},
+                    options=day_options,
+                    value=None,
+                    placeholder="Jour (opt)",
+                    clearable=True,
+                    persistence=True,
+                    persistence_type="memory",
+                )
+            )
+            helper_text = "Sélectionne au moins une année et un mois. Le jour est optionnel."
+        else:
+            helper_text = "Sélectionne un mois et une année."
+
+        return html.Div(
+            [
+                html.Div(
+                    date_inputs,
+                    className="month-pair-row",
+                ),
+                html.Div(helper_text, className="filter-helper"),
+            ]
+        )
+
+    series = df[column].fillna("<NA>").astype(str)
+    counts = series.value_counts(dropna=False)
+    if operator == "equals":
+        options = [{"label": f"{truncate_label(index, 42)} ({count})", "value": index} for index, count in counts.items()]
+        return html.Div(
+            [
+                dcc.Checklist(
+                    id={"type": "adv-cat-all", "row": row_index},
+                    options=[{"label": "All", "value": "all"}],
+                    value=[],
+                    inline=True,
+                    persistence=True,
+                    persistence_type="memory",
+                ),
+                dcc.Dropdown(
+                    id={"type": "adv-cat-values", "row": row_index},
+                    options=options,
+                    value=[],
+                    multi=True,
+                    placeholder="Sélectionne une ou plusieurs valeurs",
+                    persistence=True,
+                    persistence_type="memory",
+                ),
+                html.Div("Laisse vide pour ne rien filtrer sur cette règle.", className="filter-helper"),
+            ]
+        )
+
+    placeholder = "Texte à rechercher"
+    if operator in {"starts with", "ends with", "contains", "equals"}:
+        placeholder = f"{operator.title()}..."
+    return html.Div(
+        [
+            dcc.Input(
+                id={"type": "adv-text-value", "row": row_index},
+                type="text",
+                placeholder=placeholder,
+                debounce=True,
+                className="advanced-input",
+                persistence=True,
+                persistence_type="memory",
+            )
+        ]
+    )
+
+
+def extract_advanced_rule_mask(df: pd.DataFrame, rule: dict[str, Any]) -> pd.Series:
+    column = rule.get("column")
+    if not column or column not in df.columns:
+        return pd.Series(True, index=df.index)
+
+    kind = rule.get("kind") or infer_column_kind(df, column)
+    operator = str(rule.get("operator") or "").lower()
+    value = rule.get("value")
+
+    if kind == "numeric":
+        numeric = pd.to_numeric(df[column], errors="coerce")
+        scalar_value = None
+        if isinstance(value, dict):
+            scalar_value = value.get("value")
+        else:
+            scalar_value = value
+        if scalar_value in (None, ""):
+            return pd.Series(True, index=df.index)
+        scalar = float(scalar_value)
+        if operator == "equals":
+            return numeric == scalar
+        if operator == ">":
+            return numeric > scalar
+        if operator == ">=":
+            return numeric >= scalar
+        if operator == "<":
+            return numeric < scalar
+        if operator == "<=":
+            return numeric <= scalar
+        return pd.Series(True, index=df.index)
+
+    if kind == "date":
+        dates = pd.to_datetime(df[column], errors="coerce")
+        periods = dates.dt.to_period("M")
+        if operator == "between":
+            start_year = value.get("start_year") if isinstance(value, dict) else None
+            start_month = value.get("start_month") if isinstance(value, dict) else None
+            end_year = value.get("end_year") if isinstance(value, dict) else None
+            end_month = value.get("end_month") if isinstance(value, dict) else None
+            if start_year in (None, "") or start_month in (None, "") or end_year in (None, "") or end_month in (None, ""):
+                return pd.Series(True, index=df.index)
+            start_period = pd.Period(f"{int(start_year):04d}-{int(start_month):02d}", freq="M")
+            end_period = pd.Period(f"{int(end_year):04d}-{int(end_month):02d}", freq="M")
+            if start_period > end_period:
+                return pd.Series(True, index=df.index)
+            return (periods >= start_period) & (periods <= end_period)
+        date_year = value.get("year") if isinstance(value, dict) else None
+        date_month = value.get("month") if isinstance(value, dict) else None
+        date_day = value.get("day") if isinstance(value, dict) else None
+        
+        if date_year in (None, "") or date_month in (None, ""):
+            return pd.Series(True, index=df.index)
+            
+        if operator == "equals" and date_day not in (None, ""):
+            try:
+                selected_date = pd.Timestamp(year=int(date_year), month=int(date_month), day=int(date_day))
+                return dates.dt.date == selected_date.date()
+            except ValueError:
+                return pd.Series(False, index=df.index)
+        
+        selected_period = pd.Period(f"{int(date_year):04d}-{int(date_month):02d}", freq="M")
+        if operator == "equals":
+            return periods == selected_period
+        if operator == "after":
+            return periods >= selected_period
+        if operator == "before":
+            return periods <= selected_period
+        return pd.Series(True, index=df.index)
+
+    text = df[column].fillna("<NA>").astype(str)
+    if isinstance(value, list):
+        cleaned_values = [str(item) for item in value if item not in (None, "")]
+    else:
+        cleaned_values = [str(value)] if value not in (None, "") else []
+
+    if not cleaned_values:
+        return pd.Series(True, index=df.index)
+
+    needle = cleaned_values[0]
+    if operator == "contains":
+        return text.str.contains(re.escape(needle), case=False, na=False, regex=True)
+    if operator == "equals":
+        return text.str.upper().isin({item.upper() for item in cleaned_values})
+    if operator == "starts with":
+        return text.str.startswith(needle, na=False)
+    if operator == "ends with":
+        return text.str.endswith(needle, na=False)
+    return pd.Series(True, index=df.index)
+
+
+def apply_advanced_filters(df: pd.DataFrame, filter_bundle: dict[str, Any] | None) -> pd.DataFrame:
+    if not filter_bundle:
+        return df
+
+    rules = filter_bundle.get("rules", [])
+    logic = str(filter_bundle.get("logic", "AND")).upper()
+    masks: list[pd.Series] = []
+    for rule in rules:
+        if not rule or not rule.get("column"):
+            continue
+        masks.append(extract_advanced_rule_mask(df, rule))
+
+    if not masks:
+        return df
+
+    final_mask = masks[0].copy()
+    for mask in masks[1:]:
+        final_mask = final_mask | mask if logic == "OR" else final_mask & mask
+
+    return df[final_mask]
+
+
+def advanced_filter_summary(filter_bundle: dict[str, Any] | None) -> str:
+    if not filter_bundle:
+        return "Aucun filtre avancé appliqué."
+    rules = filter_bundle.get("rules", [])
+    active_rules = [rule for rule in rules if rule.get("column")]
+    if not active_rules:
+        return "Aucun filtre avancé appliqué."
+    logic = str(filter_bundle.get("logic", "AND")).upper()
+    parts: list[str] = []
+    for idx, rule in enumerate(active_rules, start=1):
+        operator = str(rule.get("operator", ""))
+        value = rule.get("value")
+        if isinstance(value, dict):
+            if operator == "between":
+                start = format_year_month(value.get("start_year"), value.get("start_month"))
+                end = format_year_month(value.get("end_year"), value.get("end_month"))
+                value_repr = f"{start} → {end}"
+            elif value.get("year") is not None or value.get("month") is not None:
+                base = format_year_month(value.get("year"), value.get("month"))
+                if value.get("day"):
+                    value_repr = f"{base}-{int(value.get('day')):02d}"
+                else:
+                    value_repr = base
+            else:
+                value_repr = ", ".join([str(v) for v in value.values() if v not in (None, "")])
+        elif isinstance(value, list):
+            value_repr = ", ".join([str(item) for item in value[:5]])
+        else:
+            value_repr = str(value)
+        parts.append(f"Filtre {idx}: {rule.get('column')} {operator} {truncate_label(value_repr, 40)}")
+    return "\n".join([f"Logique {logic}"] + parts)
+
+
+def cramers_v(table: pd.DataFrame) -> float:
+    if table.empty or table.shape[0] < 2 or table.shape[1] < 2:
+        return 0.0
+    observed = table.to_numpy(dtype=float)
+    total = observed.sum()
+    if total == 0:
+        return 0.0
+    row_sums = observed.sum(axis=1, keepdims=True)
+    col_sums = observed.sum(axis=0, keepdims=True)
+    expected = row_sums @ col_sums / total
+    with np.errstate(divide="ignore", invalid="ignore"):
+        chi2 = np.nansum((observed - expected) ** 2 / expected)
+    n = total
+    r, c = observed.shape
+    denom = n * (min(r - 1, c - 1) or 1)
+    return float(np.sqrt(max(chi2 / denom, 0.0)))
+
+
+def correlation_ratio(categories: pd.Series, measurements: pd.Series) -> float:
+    cat = categories.fillna("<NA>").astype(str)
+    meas = pd.to_numeric(measurements, errors="coerce")
+    valid = meas.notna()
+    cat = cat[valid]
+    meas = meas[valid]
+    if cat.empty or meas.empty:
+        return 0.0
+    grand_mean = meas.mean()
+    ss_between = 0.0
+    ss_total = float(((meas - grand_mean) ** 2).sum())
+    if ss_total == 0:
+        return 0.0
+    for _, group in meas.groupby(cat):
+        if group.empty:
+            continue
+        ss_between += len(group) * float((group.mean() - grand_mean) ** 2)
+    return float(np.sqrt(min(ss_between / ss_total, 1.0)))
+
+
+def interaction_score(df: pd.DataFrame, x_var: str, y_var: str) -> tuple[float, str]:
+    x_kind = infer_column_kind(df, x_var)
+    y_kind = infer_column_kind(df, y_var)
+    work = df[[x_var, y_var]].dropna().copy()
+    if work.empty:
+        return 0.0, "insufficient-data"
+
+    if x_kind == "numeric" and y_kind == "numeric":
+        corr = pd.to_numeric(work[x_var], errors="coerce").corr(pd.to_numeric(work[y_var], errors="coerce"))
+        return float(abs(corr)) if pd.notna(corr) else 0.0, "numeric-numeric"
+    if x_kind == "categorical" and y_kind == "categorical":
+        ctab = pd.crosstab(work[x_var].astype(str), work[y_var].astype(str))
+        return cramers_v(ctab), "categorical-categorical"
+    if x_kind == "numeric" and y_kind == "categorical":
+        return correlation_ratio(work[y_var], work[x_var]), "categorical-numeric"
+    if x_kind == "categorical" and y_kind == "numeric":
+        return correlation_ratio(work[x_var], work[y_var]), "categorical-numeric"
+    if x_kind == "date" and y_kind == "numeric":
+        temp = pd.to_datetime(work[x_var], errors="coerce")
+        if temp.notna().any():
+            temp_num = pd.Series(np.where(temp.notna(), temp.astype("int64"), np.nan), index=temp.index, dtype="float64")
+            return float(abs(temp_num.corr(pd.to_numeric(work[y_var], errors="coerce")))), "date-numeric"
+    if x_kind == "numeric" and y_kind == "date":
+        temp = pd.to_datetime(work[y_var], errors="coerce")
+        if temp.notna().any():
+            temp_num = pd.Series(np.where(temp.notna(), temp.astype("int64"), np.nan), index=temp.index, dtype="float64")
+            return float(abs(pd.to_numeric(work[x_var], errors="coerce").corr(temp_num))), "date-numeric"
+    return 0.0, "other"
+
+
+def build_interaction_ranking(df: pd.DataFrame, focal_column: str | None, limit: int = 10) -> pd.DataFrame:
+    if not focal_column or focal_column not in df.columns:
+        return pd.DataFrame(columns=["PAIR", "SCORE", "KIND"])
+
+    rows: list[dict[str, Any]] = []
+    for column in df.columns:
+        if column == focal_column:
+            continue
+        score, kind = interaction_score(df, focal_column, column)
+        if score > 0:
+            rows.append(
+                {
+                    "PAIR": f"{focal_column} × {column}",
+                    "LEFT": focal_column,
+                    "RIGHT": column,
+                    "SCORE": round(score, 4),
+                    "KIND": kind,
+                    "SUGGESTED_PLOT": "scatter" if kind == "numeric-numeric" else ("heatmap" if kind == "categorical-categorical" else "box"),
+                }
+            )
+    ranking = pd.DataFrame(rows)
+    if ranking.empty:
+        return ranking
+    return ranking.sort_values("SCORE", ascending=False).head(limit).reset_index(drop=True)
+
+
+def build_numeric_correlation_figure(df: pd.DataFrame, columns: list[str] | None = None) -> go.Figure:
+    numeric_cols = columns or [column for column in df.columns if infer_column_kind(df, column) == "numeric"]
+    numeric_cols = numeric_cols[:15]
+    if len(numeric_cols) < 2:
+        return build_empty_figure("Pas assez de variables numériques.")
+    corr = df[numeric_cols].apply(pd.to_numeric, errors="coerce").corr().fillna(0)
+    fig = px.imshow(corr, text_auto=True, color_continuous_scale="Blues", aspect="auto", title="Matrice de corrélation numérique")
+    fig.update_layout(template="plotly_white")
+    return fig
+
+
+def build_encoded_corr_matrix(df: pd.DataFrame, selected_columns: list[str] | None = None, max_cols: int = MAX_INTERACTION_CORR_COLS) -> pd.DataFrame:
+    usable = [
+        column
+        for column in df.columns
+        if infer_column_kind(df, column) in {"numeric", "categorical", "date"}
+    ]
+    if len(usable) < 2:
+        return pd.DataFrame()
+
+    if not selected_columns:
+        return pd.DataFrame()
+
+    if "__ALL__" in selected_columns and len(selected_columns) == 1:
+        ordered = usable[:max_cols]
+    else:
+        ordered = [column for column in selected_columns if column != "__ALL__" and column in usable][:max_cols]
+
+    if len(ordered) < 2:
+        return pd.DataFrame()
+
+    encoded: dict[str, pd.Series] = {}
+    for column in ordered:
+        kind = infer_column_kind(df, column)
+        if kind == "numeric":
+            encoded[column] = pd.to_numeric(df[column], errors="coerce")
+        elif kind == "date":
+            dt = pd.to_datetime(df[column], errors="coerce")
+            encoded[column] = pd.Series(np.where(dt.notna(), dt.astype("int64"), np.nan), index=df.index, dtype="float64")
+        else:
+            text = df[column].fillna("<NA>").astype(str)
+            codes, _ = pd.factorize(text, sort=True)
+            encoded[column] = pd.Series(np.where(codes >= 0, codes, np.nan), index=df.index, dtype="float64")
+
+    corr = pd.DataFrame(encoded).corr().fillna(0)
+    return corr
+
+
+def build_encoded_correlation_figure(df: pd.DataFrame, selected_columns: list[str] | None = None, max_cols: int = MAX_INTERACTION_CORR_COLS) -> go.Figure:
+    corr = build_encoded_corr_matrix(df, selected_columns=selected_columns, max_cols=max_cols)
+    if corr.empty or corr.shape[0] < 2:
+        return build_empty_figure("Sélectionne au moins 2 variables (ou ALL) pour calculer la corrélation.")
+    fig = px.imshow(
+        corr,
+        text_auto=True,
+        color_continuous_scale="RdBu",
+        zmin=-1,
+        zmax=1,
+        aspect="auto",
+        title=f"Matrice de corrélation encodée (max {max_cols} variables)",
+    )
+    fig.update_layout(template="plotly_white")
+    return fig
+
+
+def compute_focal_correlation_scores(df: pd.DataFrame, focal_column: str | None, max_cols: int = MAX_INTERACTION_CORR_COLS) -> pd.DataFrame:
+    if not focal_column or focal_column not in df.columns:
+        return pd.DataFrame(columns=["VARIABLE", "CORR", "ABS_CORR"])
+
+    usable = [
+        column
+        for column in df.columns
+        if column != focal_column and infer_column_kind(df, column) in {"numeric", "categorical", "date"}
+    ]
+    ordered = [focal_column] + usable[: max(0, max_cols - 1)]
+    corr = build_encoded_corr_matrix(df, selected_columns=ordered, max_cols=max_cols)
+    if corr.empty or focal_column not in corr.columns:
+        return pd.DataFrame(columns=["VARIABLE", "CORR", "ABS_CORR"])
+
+    scores = corr[focal_column].drop(labels=[focal_column], errors="ignore").sort_values(key=np.abs, ascending=False)
+    if scores.empty:
+        return pd.DataFrame(columns=["VARIABLE", "CORR", "ABS_CORR"])
+
+    plot_df = scores.reset_index()
+    plot_df.columns = ["VARIABLE", "CORR"]
+    plot_df["ABS_CORR"] = plot_df["CORR"].abs().round(4)
+    plot_df["CORR"] = plot_df["CORR"].round(4)
+    return plot_df
+
+
+def build_focal_correlation_figure(df: pd.DataFrame, focal_column: str | None) -> go.Figure:
+    plot_df = compute_focal_correlation_scores(df, focal_column, max_cols=MAX_INTERACTION_CORR_COLS)
+    if plot_df.empty:
+        return build_empty_figure("Corrélation indisponible pour cette variable.")
+    fig = px.bar(plot_df, x="VARIABLE", y="CORR", color="CORR", color_continuous_scale="RdBu", range_color=[-1, 1], title=f"Corrélation de {focal_column} avec les autres (encodée)")
+    fig.update_layout(template="plotly_white")
+    fig.update_xaxes(tickangle=35)
+    return fig
+
+
+def build_conditional_insight_figure(df: pd.DataFrame, focal_column: str | None, target_column: str | None) -> go.Figure:
+    if not focal_column or not target_column or focal_column not in df.columns or target_column not in df.columns:
+        return build_empty_figure("Choisis une variable focale et une variable cible.")
+    if focal_column == target_column:
+        return build_empty_figure("La focale et la cible doivent être différentes.")
+
+    work = df[[focal_column, target_column]].copy()
+    target = top_categories(work[target_column], limit=MAX_CATEGORY_TREND)
+    focal_text = work[focal_column].fillna("").astype(str).str.strip()
+    focal_is_null = work[focal_column].isna() | focal_text.eq("") | focal_text.eq("<NA>")
+    agg = (
+        pd.DataFrame({"TARGET": target, "FOCAL_IS_NULL": focal_is_null})
+        .groupby("TARGET")
+        .agg(VOLUME=("FOCAL_IS_NULL", "size"), NULL_RATE=("FOCAL_IS_NULL", "mean"))
+        .reset_index()
+    )
+    if agg.empty:
+        return build_empty_figure("Pas assez de données pour l'insight conditionnel.")
+    agg["NULL_RATE"] = agg["NULL_RATE"] * 100.0
+
+    fig = go.Figure()
+    fig.add_bar(x=agg["TARGET"], y=agg["VOLUME"], name="Volume", yaxis="y")
+    fig.add_scatter(x=agg["TARGET"], y=agg["NULL_RATE"], mode="lines+markers", name=f"{focal_column} null (%)", yaxis="y2")
+    fig.update_layout(
+        template="plotly_white",
+        title=f"Insight conditionnel: {focal_column} selon {target_column}",
+        xaxis_title=target_column,
+        yaxis={"title": "Volume"},
+        yaxis2={"title": "Taux de null (%)", "overlaying": "y", "side": "right"},
+        barmode="group",
+    )
+    fig.update_xaxes(tickangle=30)
+    return fig
+
+
+def build_encoded_corr_matrix(df: pd.DataFrame, selected_columns: list[str] | None = None, max_cols: int = MAX_INTERACTION_CORR_COLS) -> pd.DataFrame:
+    usable = [
+        column
+        for column in df.columns
+        if infer_column_kind(df, column) in {"numeric", "categorical", "date"}
+    ]
+    if len(usable) < 2:
+        return pd.DataFrame()
+
+    if not selected_columns:
+        return pd.DataFrame()
+
+    if "__ALL__" in selected_columns and len(selected_columns) == 1:
+        ordered = usable[:max_cols]
+    else:
+        ordered = [column for column in selected_columns if column != "__ALL__" and column in usable][:max_cols]
+
+    if len(ordered) < 2:
+        return pd.DataFrame()
+
+    encoded: dict[str, pd.Series] = {}
+    for column in ordered:
+        kind = infer_column_kind(df, column)
+        if kind == "numeric":
+            encoded[column] = pd.to_numeric(df[column], errors="coerce")
+        elif kind == "date":
+            dt = pd.to_datetime(df[column], errors="coerce")
+            encoded[column] = pd.Series(np.where(dt.notna(), dt.astype("int64"), np.nan), index=df.index, dtype="float64")
+        else:
+            text = df[column].fillna("<NA>").astype(str)
+            codes, _ = pd.factorize(text, sort=True)
+            encoded[column] = pd.Series(np.where(codes >= 0, codes, np.nan), index=df.index, dtype="float64")
+
+    corr = pd.DataFrame(encoded).corr().fillna(0)
+    return corr
+
+
+def build_encoded_correlation_figure(df: pd.DataFrame, selected_columns: list[str] | None = None, max_cols: int = MAX_INTERACTION_CORR_COLS) -> go.Figure:
+    corr = build_encoded_corr_matrix(df, selected_columns=selected_columns, max_cols=max_cols)
+    if corr.empty or corr.shape[0] < 2:
+        return build_empty_figure("Sélectionne au moins 2 variables (ou ALL) pour calculer la corrélation.")
+    fig = px.imshow(
+        corr,
+        text_auto=True,
+        color_continuous_scale="RdBu",
+        zmin=-1,
+        zmax=1,
+        aspect="auto",
+        title=f"Matrice de corrélation encodée (max {max_cols} variables)",
+    )
+    fig.update_layout(template="plotly_white")
+    return fig
+
+
+def build_focal_correlation_figure(df: pd.DataFrame, focal_column: str | None) -> go.Figure:
+    plot_df = compute_focal_correlation_scores(df, focal_column, max_cols=MAX_INTERACTION_CORR_COLS)
+    if plot_df.empty:
+        return build_empty_figure("Corrélation indisponible pour cette variable.")
+    fig = px.bar(plot_df, x="VARIABLE", y="CORR", color="CORR", color_continuous_scale="RdBu", range_color=[-1, 1], title=f"Corrélation de {focal_column} avec les autres (encodée)")
+    fig.update_layout(template="plotly_white")
+    fig.update_xaxes(tickangle=35)
+    return fig
+
+
+def build_conditional_insight_figure(df: pd.DataFrame, focal_column: str | None, target_column: str | None) -> go.Figure:
+    if not focal_column or not target_column or focal_column not in df.columns or target_column not in df.columns:
+        return build_empty_figure("Choisis une variable focale et une variable cible.")
+    if focal_column == target_column:
+        return build_empty_figure("La focale et la cible doivent être différentes.")
+
+    work = df[[focal_column, target_column]].copy()
+    target = top_categories(work[target_column], limit=MAX_CATEGORY_TREND)
+    focal_text = work[focal_column].fillna("").astype(str).str.strip()
+    focal_is_null = work[focal_column].isna() | focal_text.eq("") | focal_text.eq("<NA>")
+    agg = (
+        pd.DataFrame({"TARGET": target, "FOCAL_IS_NULL": focal_is_null})
+        .groupby("TARGET")
+        .agg(VOLUME=("FOCAL_IS_NULL", "size"), NULL_RATE=("FOCAL_IS_NULL", "mean"))
+        .reset_index()
+    )
+    if agg.empty:
+        return build_empty_figure("Pas assez de données pour l'insight conditionnel.")
+    agg["NULL_RATE"] = agg["NULL_RATE"] * 100.0
+
+    fig = go.Figure()
+    fig.add_bar(x=agg["TARGET"], y=agg["VOLUME"], name="Volume", yaxis="y")
+    fig.add_scatter(x=agg["TARGET"], y=agg["NULL_RATE"], mode="lines+markers", name=f"{focal_column} null (%)", yaxis="y2")
+    fig.update_layout(
+        template="plotly_white",
+        title=f"Insight conditionnel: {focal_column} selon {target_column}",
+        xaxis_title=target_column,
+        yaxis={"title": "Volume"},
+        yaxis2={"title": "Taux de null (%)", "overlaying": "y", "side": "right"},
+        barmode="group",
+    )
+    fig.update_xaxes(tickangle=30)
+    return fig
+
+
+def first_or_none(values: list[Any] | None) -> Any:
+    if not values:
+        return None
+    return values[0]
+
+
+def safe_top_value_counts(series: pd.Series, top_n: int = MAX_CATEGORICAL_VALUES_FOR_SELECTOR) -> pd.Series:
+    as_text = series.fillna("<NA>").astype(str)
+    if len(as_text) > 800_000:
+        sample = as_text.sample(250_000, random_state=42)
+        return sample.value_counts().head(top_n)
+    return as_text.value_counts().head(top_n)
+
+
+def compare_plot_options(x_kind: str, y_kind: str) -> list[dict[str, str]]:
+    if x_kind == "numeric" and y_kind == "numeric":
+        return [
+            {"label": "Auto", "value": "auto"},
+            {"label": "Scatter", "value": "scatter"},
+            {"label": "Densité 2D", "value": "density"},
+        ]
+    if x_kind == "categorical" and y_kind == "categorical":
+        return [
+            {"label": "Auto", "value": "auto"},
+            {"label": "Heatmap", "value": "heatmap"},
+            {"label": "Barres empilées", "value": "stacked"},
+        ]
+    if (x_kind == "date" and y_kind == "categorical") or (x_kind == "categorical" and y_kind == "date"):
+        return [
+            {"label": "Auto", "value": "auto"},
+            {"label": "Barres groupées + ligne (%)", "value": "grouped-line"},
+            {"label": "Barres groupées", "value": "grouped"},
+            {"label": "Lignes par catégorie (Top 10)", "value": "line-category"},
+            {"label": "Aire empilée (Top 10)", "value": "stacked-area"},
+            {"label": "Barres empilées (Top 10)", "value": "stacked"},
+        ]
+    if (x_kind == "date" and y_kind == "numeric") or (x_kind == "numeric" and y_kind == "date"):
+        return [
+            {"label": "Auto", "value": "auto"},
+            {"label": "Line", "value": "line"},
+            {"label": "Scatter", "value": "scatter"},
+        ]
+    if (x_kind == "numeric" and y_kind == "categorical") or (x_kind == "categorical" and y_kind == "numeric"):
+        return [
+            {"label": "Auto", "value": "auto"},
+            {"label": "Boxplot", "value": "box"},
+            {"label": "Violin", "value": "violin"},
+            {"label": "Barres (moyenne)", "value": "bar"},
+        ]
+    return [{"label": "Auto", "value": "auto"}]
+
+
+def eda_plot_options(kind: str) -> list[dict[str, str]]:
+    if kind == "date":
+        allowed = ["auto", "line", "bar"]
+    elif kind == "numeric":
+        allowed = ["auto", "histogram", "bar", "box", "violin"]
+    else:
+        allowed = ["auto", "bar"]
+    return [{"label": value.title(), "value": value} for value in allowed]
+
+
+def format_metric_card(label: str, value: str, subtitle: str = "") -> html.Div:
+    return html.Div(
+        [
+            html.Div(label, className="metric-label"),
+            html.Div(value, className="metric-value"),
+            html.Div(subtitle, className="metric-subtitle"),
+        ],
+        className="metric-card",
+    )
+
+
+def build_dataset_summary(df: pd.DataFrame) -> html.Div:
+    if df.empty:
+        return html.Div("Aucune donnée chargée.", className="empty-state")
+    n_obs = int(len(df))
+    n_vars = int(df.shape[1])
+    total_cells = max(n_obs * n_vars, 1)
+    missing_cells = int(df.isna().sum().sum())
+    missing_pct = missing_cells / total_cells * 100.0
+    dup_rows = int(df.duplicated().sum())
+    dup_pct = (dup_rows / n_obs * 100.0) if n_obs else 0.0
+    mem_total = int(df.memory_usage(deep=True).sum())
+    avg_record = int(mem_total / n_obs) if n_obs else 0
+
+    kinds = [infer_column_kind(df, column) for column in df.columns]
+    kind_counts = pd.Series(kinds).value_counts().to_dict()
+    kind_repr = " | ".join([f"{key}: {value}" for key, value in sorted(kind_counts.items())])
+
+    return html.Div(
+        [
+            html.H4("Dataset statistics"),
+            html.Div(
+                [
+                    metric_kv_card("Number of variables", n_vars),
+                    metric_kv_card("Number of observations", f"{n_obs:,}".replace(",", " ")),
+                    metric_kv_card("Missing cells", f"{missing_cells:,}".replace(",", " ")),
+                    metric_kv_card("Missing cells (%)", format_pct(missing_pct)),
+                    metric_kv_card("Duplicate rows", f"{dup_rows:,}".replace(",", " ")),
+                    metric_kv_card("Duplicate rows (%)", format_pct(dup_pct)),
+                    metric_kv_card("Total size in memory", format_bytes(mem_total)),
+                    metric_kv_card("Average record size in memory", format_bytes(avg_record)),
+                    metric_kv_card("Variable types", kind_repr),
+                ],
+                className="summary-kv-grid",
+            ),
+        ],
+        className="panel",
+    )
+
+
+def resolve_filter_mask(df: pd.DataFrame, filter_column: str | None, filter_values: list[str] | None, min_value: float | None, max_value: float | None, date_start: str | None, date_end: str | None) -> pd.Series:
+    mask = pd.Series(True, index=df.index)
+    if not filter_column or filter_column not in df.columns:
+        return mask
+
+    kind = infer_column_kind(df, filter_column)
+    series = df[filter_column]
+
+    if kind == "categorical":
+        if filter_values:
+            mask &= series.fillna("<NA>").astype(str).isin(filter_values)
+    elif kind == "numeric":
+        numeric = pd.to_numeric(series, errors="coerce")
+        if min_value is not None:
+            mask &= numeric >= float(min_value)
+        if max_value is not None:
+            mask &= numeric <= float(max_value)
+    elif kind == "date":
+        dt = pd.to_datetime(series, errors="coerce")
+        if date_start:
+            mask &= dt >= pd.to_datetime(date_start)
+        if date_end:
+            mask &= dt <= pd.to_datetime(date_end)
+
+    return mask
+
+
+def apply_basic_filters(df: pd.DataFrame, country_selection: list[str], date_start: str | None, date_end: str | None) -> pd.DataFrame:
+    out = df.copy()
+    if "COUNTRY" in out.columns and country_selection:
+        countries = {normalize_text(country) for country in country_selection}
+        out = out[out["COUNTRY"].astype(str).str.upper().isin(countries)]
+    if "COB_DATE" in out.columns:
+        cob = pd.to_datetime(out["COB_DATE"], errors="coerce")
+        if date_start:
+            out = out[cob >= pd.to_datetime(date_start)]
+        if date_end:
+            out = out[cob <= pd.to_datetime(date_end)]
+    return out
+
+
+def build_eda_figure(df: pd.DataFrame, variable: str, plot_type: str) -> go.Figure:
+    if not variable or variable not in df.columns:
+        return build_empty_figure("Choisis une variable pour explorer.")
+
+    work = df[[variable]].copy()
+    kind = infer_column_kind(df, variable)
+
+    if kind == "date":
+        series = pd.to_datetime(work[variable], errors="coerce").dropna()
+        if series.empty:
+            return build_empty_figure("Aucune date exploitable.")
+        grouped = series.dt.to_period("M").astype(str).value_counts().sort_index().reset_index()
+        grouped.columns = ["period", "count"]
+        if len(grouped) > 120:
+            period_q = pd.to_datetime(series, errors="coerce").dt.to_period("Q").astype(str)
+            grouped = period_q.value_counts().sort_index().reset_index()
+            grouped.columns = ["period", "count"]
+        if len(grouped) > 80:
+            period_y = pd.to_datetime(series, errors="coerce").dt.to_period("Y").astype(str)
+            grouped = period_y.value_counts().sort_index().reset_index()
+            grouped.columns = ["period", "count"]
+        fig = px.line(grouped, x="period", y="count", markers=True, title=f"Répartition temporelle de {variable}")
+        fig.update_layout(template="plotly_white", xaxis_title=variable, yaxis_title="Volume")
+        fig.update_xaxes(tickangle=45)
+        return fig
+
+    if kind == "numeric":
+        numeric = pd.to_numeric(work[variable], errors="coerce")
+        work = work.assign(_value=numeric).dropna(subset=["_value"])
+        if work.empty:
+            return build_empty_figure("Aucune valeur numérique exploitable.")
+        if plot_type in ("auto", "histogram"):
+            fig = px.histogram(work, x="_value", nbins=40, title=f"Distribution de {variable}")
+            fig.update_layout(template="plotly_white", xaxis_title=variable, yaxis_title="Count")
+            return fig
+        if plot_type == "bar":
+            bins = min(24, max(8, int(np.sqrt(len(work)))))
+            bucket = pd.cut(work["_value"], bins=bins, include_lowest=True, duplicates="drop")
+            b = bucket.value_counts(dropna=False).sort_index().reset_index()
+            b.columns = ["bucket", "count"]
+            b["bucket"] = b["bucket"].astype(str)
+            fig = px.bar(b, x="bucket", y="count", title=f"Distribution (bins) de {variable}")
+            fig.update_layout(template="plotly_white", xaxis_title=variable, yaxis_title="Count")
+            fig.update_xaxes(tickangle=35)
+            return fig
+        if plot_type == "box":
+            fig = px.box(work, y="_value", title=f"Boxplot de {variable}")
+            fig.update_layout(template="plotly_white", yaxis_title=variable)
+            return fig
+        if plot_type == "violin":
+            fig = px.violin(work, y="_value", box=True, points="outliers", title=f"Violin de {variable}")
+            fig.update_layout(template="plotly_white", yaxis_title=variable)
+            return fig
+        fig = px.histogram(work, x="_value", nbins=40, title=f"Distribution de {variable}")
+        fig.update_layout(template="plotly_white")
+        return fig
+
+    # categorical
+    cat_series = top_categories(work[variable], limit=MAX_TOP_CATEGORIES)
+    work = work.assign(_value=cat_series)
+    counts = work["_value"].fillna("<NA>").astype(str).value_counts().reset_index()
+    counts.columns = [variable, "count"]
+    counts = counts.sort_values("count", ascending=False).reset_index(drop=True)
+    counts["pct"] = (counts["count"] / counts["count"].sum() * 100.0).round(1)
+    counts["pct_label"] = counts["pct"].astype(str) + "%"
+    counts[variable] = counts[variable].map(lambda value: truncate_label(value, 15))
+
+    if plot_type in ("auto", "bar"):
+        fig = px.bar(counts, x=variable, y="count", text="pct_label", title=f"Répartition de {variable}")
+        fig.update_layout(template="plotly_white", xaxis_title=variable, yaxis_title="Count")
+        fig.update_xaxes(tickangle=35)
+        return fig
+
+    fig = px.bar(counts, x=variable, y="count", text="pct_label", title=f"Répartition de {variable}")
+    fig.update_layout(template="plotly_white")
+    fig.update_xaxes(tickangle=35)
+    return fig
+
+
+def build_eda_output_table(df: pd.DataFrame, variable: str, page: int = 1, page_size: int = 12) -> tuple[html.Div, int]:
+    kind = infer_column_kind(df, variable)
+    if kind == "categorical":
+        series = df[variable].fillna("<NA>").astype(str)
+        distinct = int(series.nunique(dropna=False))
+        missing = int(df[variable].isna().sum())
+        total = len(df)
+        counts = series.value_counts(dropna=False).reset_index()
+        counts.columns = [variable, "COUNT"]
+        counts["SHARE_PCT"] = (counts["COUNT"] / max(total, 1) * 100.0).round(2)
+        counts[variable] = counts[variable].map(lambda value: truncate_label(value, 15))
+        total_rows = len(counts)
+        pages = max(1, int(np.ceil(total_rows / max(1, page_size))))
+        page = max(1, min(int(page), pages))
+        start = (page - 1) * page_size
+        end = min(start + page_size, total_rows)
+        counts_page = counts.iloc[start:end].copy()
+        cards = [
+            metric_kv_card("Distinct", distinct),
+            metric_kv_card("Distinct (%)", format_pct(distinct / max(total, 1) * 100.0)),
+            metric_kv_card("Missing", missing),
+            metric_kv_card("Missing (%)", format_pct(missing / max(total, 1) * 100.0)),
+        ]
+        
+        # Prepare DataFrame for beautiful table
+        counts_page = counts_page.rename(columns={"COUNT": "Count", "SHARE_PCT": "Share (%)"})
+        table = build_beautiful_table(counts_page, page_size=page_size)
+
+        return html.Div([
+            html.Div(cards, className="summary-kv-grid", style={"marginBottom": "20px"}),
+            html.Div(table),
+        ]), pages
+
+    if kind == "numeric":
+        numeric_raw = pd.to_numeric(df[variable], errors="coerce")
+        numeric = numeric_raw.dropna()
+        if numeric.empty:
+            return html.Div("Aucune valeur numérique exploitable.", className="empty-state"), 1
+        total = len(df)
+        missing = int(numeric_raw.isna().sum())
+        infinite = int(np.isinf(numeric_raw.fillna(0)).sum())
+        zeros = int((numeric == 0).sum())
+        negative = int((numeric < 0).sum())
+        distinct = int(numeric.nunique(dropna=False))
+        skew_value = pd.to_numeric(pd.Series([numeric.skew()]), errors="coerce").iloc[0]
+        kurt_value = pd.to_numeric(pd.Series([numeric.kurt()]), errors="coerce").iloc[0]
+        stats = pd.DataFrame(
+            [
+                {"Metric": "Distinct", "Value": distinct},
+                {"Metric": "Distinct (%)", "Value": format_pct(distinct / max(total, 1) * 100.0)},
+                {"Metric": "Missing", "Value": missing},
+                {"Metric": "Missing (%)", "Value": format_pct(missing / max(total, 1) * 100.0)},
+                {"Metric": "Infinite", "Value": infinite},
+                {"Metric": "Infinite (%)", "Value": format_pct(infinite / max(total, 1) * 100.0)},
+                {"Metric": "Mean", "Value": float(numeric.mean())},
+                {"Metric": "Std", "Value": float(numeric.std())},
+                {"Metric": "Minimum", "Value": float(numeric.min())},
+                {"Metric": "Maximum", "Value": float(numeric.max())},
+                {"Metric": "Median", "Value": float(numeric.median())},
+                {"Metric": "Q10", "Value": float(numeric.quantile(0.10))},
+                {"Metric": "Q1", "Value": float(numeric.quantile(0.25))},
+                {"Metric": "Q3", "Value": float(numeric.quantile(0.75))},
+                {"Metric": "Q90", "Value": float(numeric.quantile(0.90))},
+                {"Metric": "Skewness", "Value": float(skew_value) if pd.notna(skew_value) else np.nan},
+                {"Metric": "Kurtosis", "Value": float(kurt_value) if pd.notna(kurt_value) else np.nan},
+                {"Metric": "Zeros", "Value": zeros},
+                {"Metric": "Zeros (%)", "Value": format_pct(zeros / max(total, 1) * 100.0)},
+                {"Metric": "Negative", "Value": negative},
+                {"Metric": "Negative (%)", "Value": format_pct(negative / max(total, 1) * 100.0)},
+            ]
+        )
+        cards = [metric_kv_card(row["Metric"], row["Value"]) for _, row in stats.iterrows()]
+        return html.Div(cards, className="summary-kv-grid"), 1
+
+    dates = pd.to_datetime(df[variable], errors="coerce").dropna()
+    if dates.empty:
+        return html.Div("Aucune date exploitable.", className="empty-state"), 1
+    month_counts = dates.dt.to_period("M").astype(str).value_counts().sort_index().reset_index()
+    month_counts.columns = ["PERIOD", "COUNT"]
+    total_rows = len(month_counts)
+    pages = max(1, int(np.ceil(total_rows / max(1, page_size))))
+    page = max(1, min(int(page), pages))
+    start = (page - 1) * page_size
+    end = min(start + page_size, total_rows)
+    month_page = month_counts.iloc[start:end].copy()
+    month_page = month_page.rename(columns={"PERIOD": "Period", "COUNT": "Count"})
+    table = build_beautiful_table(month_page, page_size=page_size)
+
+    return html.Div([
+        html.Div(table),
+    ]), pages
+
+
+def eda_output_total_pages(df: pd.DataFrame, variable: str | None, page_size: int = 12) -> int:
+    if not variable or variable not in df.columns:
+        return 1
+
+    kind = infer_column_kind(df, variable)
+    if kind == "categorical":
+        series = df[variable].fillna("<NA>").astype(str)
+        return max(1, int(np.ceil(series.value_counts(dropna=False).shape[0] / max(1, page_size))))
+
+    if kind == "date":
+        dates = pd.to_datetime(df[variable], errors="coerce").dropna()
+        if dates.empty:
+            return 1
+        month_counts = dates.dt.to_period("M").astype(str).value_counts().sort_index()
+        return max(1, int(np.ceil(month_counts.shape[0] / max(1, page_size))))
+
+    return 1
+
+
+def build_all_variables_grid(df: pd.DataFrame, page: int = 1, page_size: int = 12) -> html.Div:
+    columns = list(df.columns)
+    total_cols = len(columns)
+    if total_cols == 0:
+        return html.Div("Aucune variable disponible.", className="empty-state")
+
+    page = max(1, int(page))
+    page_size = max(1, int(page_size))
+    start = (page - 1) * page_size
+    end = min(start + page_size, total_cols)
+    columns_page = columns[start:end]
+
+    cards: list[html.Div] = []
+    for column in columns_page:
+        kind = infer_column_kind(df, column)
+        fig: go.Figure
+        if kind == "numeric":
+            vals = pd.to_numeric(df[column], errors="coerce").dropna()
+            if vals.empty:
+                continue
+            fig = px.histogram(vals.to_frame(name="value"), x="value", nbins=30, title=truncate_label(column, 40))
+        elif kind == "date":
+            dt = pd.to_datetime(df[column], errors="coerce").dropna()
+            if dt.empty:
+                continue
+            s = dt.dt.to_period("M").astype(str).value_counts().sort_index().reset_index()
+            s.columns = ["period", "count"]
+            if len(s) > 120:
+                sq = dt.dt.to_period("Q").astype(str).value_counts().sort_index().reset_index()
+                sq.columns = ["period", "count"]
+                s = sq
+            if len(s) > 80:
+                sy = dt.dt.to_period("Y").astype(str).value_counts().sort_index().reset_index()
+                sy.columns = ["period", "count"]
+                s = sy
+            fig = px.line(s, x="period", y="count", markers=True, title=truncate_label(column, 40))
+        else:
+            series = df[column].fillna("<NA>").astype(str)
+            counts = series.value_counts().head(20).reset_index()
+            counts.columns = ["category", "count"]
+            counts["category"] = counts["category"].map(lambda value: truncate_label(value, 15))
+            counts["pct"] = (counts["count"] / counts["count"].sum() * 100.0).round(1).astype(str) + "%"
+            fig = px.bar(counts, x="category", y="count", text="pct", title=truncate_label(column, 40))
+        fig.update_layout(template="plotly_white", height=280, margin={"l": 20, "r": 20, "t": 40, "b": 20}, showlegend=False)
+        cards.append(html.Div([dcc.Graph(figure=fig, config={"displayModeBar": False})], className="control-card"))
+    header = html.Div(f"Variables affichées: {start + 1} à {end} sur {total_cols}", className="hint-text")
+    return html.Div([header, html.Div(cards, className="advanced-filter-grid")])
+
+
+def build_advanced_rule_card(row_index: int, column_options: list[dict[str, str]]) -> html.Div:
+    return html.Div(
+        [
+            html.Label(f"Règle {row_index}"),
+            dcc.Dropdown(id={"type": "adv-column", "row": row_index}, options=column_options, value=None, placeholder="Colonne", persistence=True, persistence_type="memory"),
+            dcc.Dropdown(id={"type": "adv-operator", "row": row_index}, options=[], value=None, placeholder="Opérateur", persistence=True, persistence_type="memory"),
+            html.Div(id={"type": "adv-value-container", "row": row_index}),
+        ],
+        className="control-card advanced-rule-card",
+    )
+
+
+def build_compare_figure(df: pd.DataFrame, x_var: str, y_var: str, hue: str | None, plot_type: str) -> go.Figure:
+    if not x_var or not y_var or x_var not in df.columns or y_var not in df.columns:
+        return build_empty_figure("Choisis au moins deux variables.")
+
+    work = df[[x_var, y_var] + ([hue] if hue and hue in df.columns and hue not in {x_var, y_var} else [])].copy()
+    x_kind = infer_column_kind(df, x_var)
+    y_kind = infer_column_kind(df, y_var)
+
+    if x_kind == "date" and x_var.upper() not in COB_TEMPORAL_COLUMNS:
+        work[x_var] = coerce_temporal_series(work, x_var)
+    if y_kind == "date" and y_var.upper() not in COB_TEMPORAL_COLUMNS:
+        work[y_var] = coerce_temporal_series(work, y_var)
+
+    if x_kind == "numeric" and y_kind == "numeric":
+        work = work.dropna(subset=[x_var, y_var])
+        work = sample_dataframe(work)
+        if plot_type in ("auto", "scatter"):
+            fig = px.scatter(work, x=x_var, y=y_var, color=hue if hue in work.columns else None, opacity=0.55, title=f"{x_var} vs {y_var}")
+            fig.update_layout(template="plotly_white")
+            return fig
+        fig = px.density_heatmap(work, x=x_var, y=y_var, nbinsx=30, nbinsy=30, title=f"Densité {x_var} x {y_var}")
+        fig.update_layout(template="plotly_white")
+        return fig
+
+    if x_kind == "categorical" and y_kind == "categorical":
+        work[x_var] = top_categories(work[x_var])
+        work[y_var] = top_categories(work[y_var])
+        ctab = pd.crosstab(work[x_var].fillna("<NA>").astype(str), work[y_var].fillna("<NA>").astype(str))
+        if ctab.shape[0] > MAX_HEATMAP_LEVELS:
+            ctab = ctab.iloc[:MAX_HEATMAP_LEVELS, :]
+        if ctab.shape[1] > MAX_HEATMAP_LEVELS:
+            ctab = ctab.iloc[:, :MAX_HEATMAP_LEVELS]
+        if plot_type == "stacked":
+            id_col = ctab.index.name or x_var
+            ctab_long = ctab.reset_index().melt(id_vars=[id_col], var_name=y_var, value_name="count")
+            fig = px.bar(ctab_long, x=id_col, y="count", color=y_var, barmode="stack", title=f"{x_var} x {y_var}")
+            fig.update_layout(template="plotly_white")
+            fig.update_xaxes(tickangle=35)
+            return fig
+        fig = px.imshow(ctab, text_auto=True, aspect="auto", title=f"{x_var} x {y_var}")
+        fig.update_layout(template="plotly_white")
+        return fig
+
+    if x_kind == "date" or y_kind == "date":
+        date_col = x_var if x_kind == "date" else y_var
+        value_col = y_var if date_col == x_var else x_var
+        value_kind = infer_column_kind(df, value_col)
+        work = work.dropna(subset=[date_col])
+        work["period"] = temporal_period_labels(work, date_col).astype(str)
+
+        if value_kind == "categorical":
+            cats = work[value_col].fillna("<NA>").astype(str)
+            cat_counts = cats.value_counts()
+            if len(cat_counts) > MAX_CATEGORY_TREND:
+                top_cats = set(cat_counts.head(MAX_CATEGORY_TREND).index.tolist())
+                cats = cats.where(cats.isin(top_cats), "OTHER")
+                work[value_col] = cats
+            trend = (
+                work.groupby(["period", value_col])
+                .size()
+                .reset_index(name="count")
+                .sort_values("period")
+            )
+            if plot_type in ("auto", "grouped-line"):
+                total_per_period = trend.groupby("period")["count"].sum().rename("period_total")
+                trend = trend.merge(total_per_period, on="period", how="left")
+                trend["share_pct"] = np.where(
+                    trend["period_total"] > 0,
+                    trend["count"] / trend["period_total"] * 100.0,
+                    0.0,
+                )
+
+                fig = go.Figure()
+                categories = trend[value_col].dropna().astype(str).unique().tolist()
+                for category in categories:
+                    sub = trend[trend[value_col].astype(str) == str(category)].sort_values("period")
+                    fig.add_bar(
+                        x=sub["period"],
+                        y=sub["count"],
+                        name=f"{category} volume",
+                        yaxis="y",
+                    )
+                    fig.add_scatter(
+                        x=sub["period"],
+                        y=sub["share_pct"],
+                        mode="lines+markers",
+                        name=f"{category} %",
+                        yaxis="y2",
+                    )
+
+                fig.update_layout(
+                    template="plotly_white",
+                    title=f"Évolution de {value_col} (volume + part)",
+                    xaxis_title="Période",
+                    yaxis=dict(title="Volume"),
+                    yaxis2=dict(title="Part (%)", overlaying="y", side="right"),
+                    barmode="group",
+                )
+                fig.update_xaxes(tickangle=45)
+                return fig
+            if plot_type in ("line", "line-category"):
+                fig = px.line(trend, x="period", y="count", color=value_col, markers=True, title=f"Évolution par catégorie de {value_col}")
+                fig.update_layout(template="plotly_white")
+                fig.update_xaxes(tickangle=45)
+                return fig
+            if plot_type == "stacked-area":
+                fig = px.area(trend, x="period", y="count", color=value_col, title=f"Évolution empilée de {value_col}")
+                fig.update_layout(template="plotly_white")
+                fig.update_xaxes(tickangle=45)
+                return fig
+            if plot_type == "grouped":
+                fig = px.bar(trend, x="period", y="count", color=value_col, barmode="group", title=f"Volumes par catégorie de {value_col}")
+                fig.update_layout(template="plotly_white")
+                fig.update_xaxes(tickangle=45)
+                return fig
+            fig = px.bar(trend, x="period", y="count", color=value_col, barmode="stack", title=f"Volumes par catégorie de {value_col}")
+            fig.update_layout(template="plotly_white")
+            fig.update_xaxes(tickangle=45)
+            return fig
+
+        if value_kind == "numeric":
+            agg = work.groupby("period")[value_col].mean().reset_index()
+            if plot_type in ("scatter",):
+                fig = px.scatter(agg, x="period", y=value_col, title=f"Évolution de {value_col}")
+            else:
+                fig = px.line(agg, x="period", y=value_col, markers=True, title=f"Évolution de {value_col}")
+        else:
+            agg = work.groupby("period").size().reset_index(name="count")
+            fig = px.line(agg, x="period", y="count", markers=True, title=f"Volumes dans le temps")
+        fig.update_layout(template="plotly_white")
+        fig.update_xaxes(tickangle=45)
+        return fig
+
+    if x_kind == "numeric" and y_kind == "categorical":
+        work = work.dropna(subset=[x_var, y_var])
+        work[y_var] = top_categories(work[y_var])
+        if plot_type == "violin":
+            fig = px.violin(work, x=y_var, y=x_var, color=hue if hue in work.columns else None, box=True, title=f"{x_var} par {y_var}")
+        elif plot_type == "bar":
+            avg_df = work.groupby(y_var)[x_var].mean().reset_index(name="value")
+            fig = px.bar(avg_df, x=y_var, y="value", title=f"Moyenne de {x_var} par {y_var}")
+        else:
+            fig = px.box(work, x=y_var, y=x_var, color=hue if hue in work.columns else None, title=f"{x_var} par {y_var}")
+        fig.update_layout(template="plotly_white")
+        fig.update_xaxes(tickangle=30)
+        return fig
+
+    if x_kind == "categorical" and y_kind == "numeric":
+        work = work.dropna(subset=[x_var, y_var])
+        work[x_var] = top_categories(work[x_var])
+        if plot_type == "violin":
+            fig = px.violin(work, x=x_var, y=y_var, color=hue if hue in work.columns else None, box=True, title=f"{y_var} par {x_var}")
+        elif plot_type == "bar":
+            avg_df = work.groupby(x_var)[y_var].mean().reset_index(name="value")
+            fig = px.bar(avg_df, x=x_var, y="value", title=f"Moyenne de {y_var} par {x_var}")
+        else:
+            fig = px.box(work, x=x_var, y=y_var, color=hue if hue in work.columns else None, title=f"{y_var} par {x_var}")
+        fig.update_layout(template="plotly_white")
+        fig.update_xaxes(tickangle=30)
+        return fig
+
+    return build_empty_figure("Combinaison de variables non gérée.")
+
+
+def build_kpi_table(
+    df: pd.DataFrame,
+    grain: str,
+    date_col: str,
+    group_cols: list[str],
+    value_col: str | None,
+    agg_func: str,
+    pivot_rows: str | None,
+    pivot_cols: str | None,
+    chart_style: str,
+) -> tuple[pd.DataFrame, go.Figure]:
+    work = df.copy()
+    if date_col not in work.columns:
+        raise ValueError("Colonne date invalide.")
+
+    work = work.dropna(subset=[date_col])
+    work["PERIOD"] = month_grain_series(work[date_col], grain)
+
+    resolved_groups = [column for column in group_cols if column in work.columns and column not in {date_col, "PERIOD"}]
+    display_work = work.copy()
+    display_group_col: str | None = None
+    if resolved_groups:
+        normalized_group_cols: list[str] = []
+        for column in resolved_groups:
+            kind = infer_column_kind(display_work, column)
+            if kind == "date":
+                display_work[column] = month_grain_series(display_work[column], grain)
+            else:
+                display_work[column] = display_work[column].fillna("<NA>").astype(str)
+            if kind == "categorical":
+                display_work[column] = top_categories(display_work[column], limit=MAX_CATEGORY_TREND)
+            normalized_group_cols.append(column)
+
+        if len(normalized_group_cols) == 1:
+            display_group_col = normalized_group_cols[0]
+        else:
+            display_work["GROUP_LABEL"] = display_work[normalized_group_cols].astype(str).agg(" | ".join, axis=1)
+            display_work["GROUP_LABEL"] = top_categories(display_work["GROUP_LABEL"], limit=MAX_CATEGORY_TREND)
+            display_group_col = "GROUP_LABEL"
+
+    group_keys = ["PERIOD"] + ([display_group_col] if display_group_col else [])
+
+    if agg_func == "count" or not value_col or value_col not in display_work.columns:
+        grouped = display_work.groupby(group_keys).size().reset_index(name="VALUE")
+    else:
+        numeric_metric = pd.to_numeric(display_work[value_col], errors="coerce")
+        display_work = display_work.assign(_metric=numeric_metric)
+        agg_map = {"sum": "sum", "mean": "mean", "median": "median", "min": "min", "max": "max"}
+        grouped = display_work.groupby(group_keys)["_metric"].agg(agg_map.get(agg_func, "sum")).reset_index(name="VALUE")
+
+    pivot_df = grouped.copy()
+    if pivot_rows and pivot_rows in pivot_df.columns and pivot_cols and pivot_cols in pivot_df.columns:
+        pivot_df = pivot_df.pivot_table(index=pivot_rows, columns=pivot_cols, values="VALUE", aggfunc="sum", fill_value=0).reset_index()
+
+    chart_df = grouped.copy()
+    if grain == "monthly" and chart_df["PERIOD"].nunique() > MAX_KPI_CHART_POINTS:
+        last_buckets = sorted(chart_df["PERIOD"].dropna().unique().tolist())[-MAX_KPI_CHART_POINTS:]
+        chart_df = chart_df[chart_df["PERIOD"].isin(last_buckets)]
+
+    chart = go.Figure()
+    if not display_group_col:
+        if chart_style == "bar":
+            chart = px.bar(chart_df, x="PERIOD", y="VALUE", title="KPI time series")
+        elif chart_style == "area":
+            chart = px.area(chart_df, x="PERIOD", y="VALUE", title="KPI time series")
+        elif chart_style == "spline":
+            chart = px.line(chart_df, x="PERIOD", y="VALUE", markers=False, title="KPI time series")
+            chart.update_traces(line_shape="spline")
+        elif chart_style == "line-markers":
+            chart = px.line(chart_df, x="PERIOD", y="VALUE", markers=True, title="KPI time series")
+        else:
+            chart = px.line(chart_df, x="PERIOD", y="VALUE", markers=True, title="KPI time series")
+        chart.update_layout(template="plotly_white")
+        chart.update_xaxes(tickangle=45)
+        return pivot_df, chart
+
+    trend_df = chart_df.copy()
+    trend_df[display_group_col] = trend_df[display_group_col].fillna("<NA>").astype(str)
+
+    if chart_style == "line":
+        chart = px.line(trend_df, x="PERIOD", y="VALUE", color=display_group_col, markers=True, title="KPI grouped")
+        chart.update_layout(template="plotly_white")
+        chart.update_xaxes(tickangle=45)
+        return pivot_df, chart
+
+    if chart_style == "spline":
+        chart = px.line(trend_df, x="PERIOD", y="VALUE", color=display_group_col, markers=False, title="KPI grouped")
+        chart.update_traces(line_shape="spline")
+        chart.update_layout(template="plotly_white")
+        chart.update_xaxes(tickangle=45)
+        return pivot_df, chart
+
+    if chart_style == "line-markers":
+        chart = px.line(trend_df, x="PERIOD", y="VALUE", color=display_group_col, markers=True, title="KPI grouped")
+        chart.update_layout(template="plotly_white")
+        chart.update_xaxes(tickangle=45)
+        return pivot_df, chart
+
+    if chart_style == "area":
+        chart = px.area(trend_df, x="PERIOD", y="VALUE", color=display_group_col, title="KPI grouped")
+        chart.update_layout(template="plotly_white")
+        chart.update_xaxes(tickangle=45)
+        return pivot_df, chart
+
+    if chart_style == "stacked-area":
+        chart = px.area(trend_df, x="PERIOD", y="VALUE", color=display_group_col, title="KPI grouped")
+        chart.update_layout(template="plotly_white")
+        chart.update_xaxes(tickangle=45)
+        return pivot_df, chart
+
+    if chart_style == "bar":
+        chart = px.bar(trend_df, x="PERIOD", y="VALUE", color=display_group_col, barmode="group", title="KPI grouped")
+        chart.update_layout(template="plotly_white")
+        chart.update_xaxes(tickangle=45)
+        return pivot_df, chart
+
+    trend_df = trend_df.groupby(["PERIOD", display_group_col], as_index=False)["VALUE"].sum()
+    totals = trend_df.groupby("PERIOD")["VALUE"].transform("sum")
+    trend_df["SHARE"] = np.where(totals > 0, trend_df["VALUE"] / totals * 100, 0)
+
+    chart = go.Figure()
+    for category in trend_df[display_group_col].dropna().astype(str).unique().tolist():
+        subset = trend_df[trend_df[display_group_col].astype(str) == str(category)].sort_values("PERIOD")
+        chart.add_bar(x=subset["PERIOD"], y=subset["VALUE"], name=f"{category} volume")
+        chart.add_scatter(x=subset["PERIOD"], y=subset["SHARE"], mode="lines+markers", name=f"{category} %", yaxis="y2")
+    chart.update_layout(
+        template="plotly_white",
+        barmode="group",
+        title="KPI grouped",
+        yaxis2={"title": "Share %", "overlaying": "y", "side": "right"},
+    )
+    chart.update_xaxes(tickangle=45)
+    return pivot_df, chart
+
+
+catalog = scan_catalog()
+country_options = available_country_options(catalog)
+available_load_columns = discover_available_load_columns(catalog)
+load_column_options = [{"label": "ALL", "value": "__ALL__"}] + [{"label": column, "value": column} for column in available_load_columns]
+default_load_columns = [column for column in DEFAULT_SELECTED_LOAD_COLUMNS if column in available_load_columns]
+if not default_load_columns:
+    default_load_columns = available_load_columns.copy()
+min_date, max_date = available_date_bounds(catalog)
+year_options = []
+start_year_default = None
+end_year_default = None
+start_month_default = 1
+end_month_default = 12
+if min_date is not None and max_date is not None:
+    year_values = list(range(int(min_date.year), int(max_date.year) + 1))
+    year_options = [{"label": str(year), "value": year} for year in year_values]
+    start_year_default = int(min_date.year)
+    end_year_default = int(max_date.year)
+    start_month_default = int(min_date.month)
+    end_month_default = int(max_date.month)
+
+app.layout = html.Div([
+                html.Div(
+                    [
+                        html.H1(APP_TITLE, className="page-title"),
+                        html.P("Plateforme d'exploration avancée des données de la flotte automobile", className="page-subtitle"),
+                    ],
+                    className="hero-block",
+                ),
+                html.Div(
+                    [
+                        html.Div(
+                            [
+                                html.Label("Pays"),
+                                dcc.Dropdown(
+                                    id="country-selector",
+                                    options=country_options,
+                                    value=DEFAULT_COUNTRIES,
+                                    multi=True,
+                                    placeholder="Sélectionne un ou plusieurs pays",
+                                ),
+                                html.Div(
+                                    [
+                                        html.Label("Colonnes à lire"),
+                                        dcc.Dropdown(
+                                            id="load-columns-selector",
+                                            options=load_column_options,
+                                            value=default_load_columns,
+                                            multi=True,
+                                            placeholder="Choisis les colonnes à charger",
+                                        ),
+                                    ],
+                                    style={"marginTop": "8px"},
+                                ),
+                            ],
+                            className="control-card",
+                        ),
+                        html.Div(
+                            [
+                                html.Label("Echantillon par dataset (%)"),
+                                dcc.Input(
+                                    id="load-sample-pct",
+                                    type="number",
+                                    min=0,
+                                    max=100,
+                                    step="any",
+                                    value=DEFAULT_LOAD_SAMPLE_PCT,
+                                    className="advanced-input sample-pct-input",
+                                ),
+                                html.Div("100 = lecture complète. Tu peux mettre une très petite valeur.", className="filter-helper"),
+                                html.Button("Charger les données", id="load-data-button", n_clicks=0, className="primary-button"),
+                                html.Div(id="load-status", className="load-status"),
+                            ],
+                            className="control-card load-card",
+                        ),
+                    ],
+                    className="top-load-grid",
+                ),
+                html.Div(
+                    [
+                        html.Div(
+                            [
+                                html.Label("Période de lecture (mois/année)"),
+                                build_month_year_range_block(
+                                    start_year_id="load-start-year",
+                                    start_month_id="load-start-month",
+                                    end_year_id="load-end-year",
+                                    end_month_id="load-end-month",
+                                    year_options=year_options,
+                                    start_year_value=start_year_default,
+                                    start_month_value=start_month_default,
+                                    end_year_value=end_year_default,
+                                    end_month_value=end_month_default,
+                                ),
+                            ],
+                            className="control-card period-card",
+                        ),
+                    ],
+                    className="period-row",
+                ),
+                html.Div(
+                    [
+                        html.Div(
+                            [
+                                html.Div("Panneau de filtres avancés", className="panel-title"),
+                                html.Div(
+                                    "Construis des règles combinables en AND / OR. Les filtres s'appliquent après le chargement pays / dates.",
+                                    className="small-note",
+                                ),
+                            ]
+                        ),
+                        html.Div(
+                            [
+                                html.Div(
+                                    [
+                                        html.Label("Logique"),
+                                        dcc.Dropdown(
+                                            id="adv-filter-logic",
+                                            options=[{"label": option, "value": option} for option in ADV_FILTER_LOGIC_OPTIONS],
+                                            value="AND",
+                                            clearable=False,
+                                        ),
+                                    ],
+                                    className="control-card",
+                                ),
+                                html.Div(id="adv-filter-summary", className="control-card filter-summary-box"),
+                            ],
+                            className="controls-grid",
+                        ),
+                        html.Div(
+                            [
+                                html.Button("Ajouter une règle", id="adv-add-rule-button", n_clicks=0, className="secondary-button"),
+                            ],
+                            className="action-row add-rule-row",
+                        ),
+                        html.Div(id="adv-rules-container", className="advanced-filter-grid"),
+                    ],
+                    className="panel advanced-panel",
+                ),
+                dcc.Store(id="adv-rule-count", data=ADV_FILTER_ROWS),
+                dcc.Store(id="advanced-filter-store"),
+                dcc.Store(id="dataset-key"),
+                dcc.Store(id="dataset-meta"),
+                html.Div(id="summary-cards", className="summary-container"),
+                dcc.Tabs(
+                    id="main-tabs",
+                    value="tab-eda",
+                    children=[
+                        dcc.Tab(label="Exploration", value="tab-eda", className="app-tab", selected_className="app-tab--selected"),
+                        dcc.Tab(label="Comparer", value="tab-compare", className="app-tab", selected_className="app-tab--selected"),
+                        dcc.Tab(label="Builder KPI", value="tab-kpi", className="app-tab", selected_className="app-tab--selected"),
+                        dcc.Tab(label="Insights", value="tab-interactions", className="app-tab", selected_className="app-tab--selected"),
+                        dcc.Tab(label="Prévisualisation", value="tab-preview", className="app-tab", selected_className="app-tab--selected"),
+                    ],
+                ),
+                html.Div(id="tab-content", className="tab-content"),
             ],
-            style={"display": "flex", "gap": "14px", "marginBottom": "14px"},
-        ),
-        html.Div(
-            [dcc.Graph(figure=fig_delta, config={"displayModeBar": False})],
-            style={**CARD, "flex": "unset"},
-        ),
-    ])
-    return result, no_update, no_update
+            className="app-shell",
+)
 
 
-# =============================================================================
+# -----------------------------------------------------------------------------
+# Callbacks
+# -----------------------------------------------------------------------------
+@app.callback(
+    Output("dataset-key", "data"),
+    Output("dataset-meta", "data"),
+    Output("load-status", "children"),
+    Input("load-data-button", "n_clicks"),
+    State("country-selector", "value"),
+    State("load-start-year", "value"),
+    State("load-start-month", "value"),
+    State("load-end-year", "value"),
+    State("load-end-month", "value"),
+    State("load-columns-selector", "value"),
+    State("load-sample-pct", "value"),
+    prevent_initial_call=True,
+)
+def load_dataset_callback(
+    n_clicks: int,
+    countries: list[str],
+    start_year: int | None,
+    start_month: int | None,
+    end_year: int | None,
+    end_month: int | None,
+    selected_columns: list[str] | None,
+    sample_pct: float | None,
+) -> tuple[str, dict[str, Any], str]:
+    if not countries:
+        raise PreventUpdate
+
+    start_ts = month_year_to_start(start_year, start_month)
+    end_ts = month_year_to_end(end_year, end_month)
+    if start_ts is not None and end_ts is not None and start_ts > end_ts:
+        return "", {}, "Période invalide: début > fin"
+
+    start_date = start_ts.date().isoformat() if start_ts is not None else None
+    end_date = end_ts.date().isoformat() if end_ts is not None else None
+
+    selected_columns_clean = [str(column) for column in (selected_columns or []) if str(column).strip()]
+    if "__ALL__" in selected_columns_clean:
+        selected_columns_clean = available_load_columns.copy()
+    if not selected_columns_clean:
+        return "", {}, "Sélectionne au moins une colonne à charger"
+
+    resolved_sample_pct = float(sample_pct if sample_pct is not None else DEFAULT_LOAD_SAMPLE_PCT)
+    resolved_sample_pct = min(100.0, max(0.0, resolved_sample_pct))
+
+    df = load_selected_data(
+        countries,
+        start_date,
+        end_date,
+        sample_pct=resolved_sample_pct,
+        selected_columns=selected_columns_clean,
+    )
+    cache_key = str(uuid.uuid4())
+    DATA_CACHE[cache_key] = df
+
+    meta = {
+        "rows": int(len(df)),
+        "columns": list(df.columns),
+        "countries": sorted(df["COUNTRY"].astype(str).str.upper().unique().tolist()) if "COUNTRY" in df.columns else [],
+        "start_date": str(pd.to_datetime(df["COB_DATE"], errors="coerce").min()) if "COB_DATE" in df.columns else None,
+        "end_date": str(pd.to_datetime(df["COB_DATE"], errors="coerce").max()) if "COB_DATE" in df.columns else None,
+    }
+
+    status = f"Données chargées: {meta['rows']:,} lignes | colonnes: {len(meta['columns'])} | échantillon: {resolved_sample_pct:.6f}%"
+    status = status.replace(",", " ").replace(".000%", "%")
+    return cache_key, meta, status
+
+
+@app.callback(
+    Output("summary-cards", "children"),
+    Input("dataset-key", "data"),
+    Input("advanced-filter-store", "data"),
+)
+def update_summary_cards(dataset_key: str | None, advanced_filter_store: dict[str, Any] | None) -> html.Div:
+    if not dataset_key or dataset_key not in DATA_CACHE:
+        return html.Div("Charge les données pour voir le résumé.", className="empty-state")
+    filtered = apply_advanced_filters(DATA_CACHE[dataset_key], advanced_filter_store)
+    return build_dataset_summary(filtered)
+
+
+@app.callback(
+    Output("tab-content", "children"),
+    Input("main-tabs", "value"),
+    Input("dataset-key", "data"),
+)
+def render_tab(tab_value: str, dataset_key: str | None) -> html.Div:
+    loaded = bool(dataset_key) and dataset_key in DATA_CACHE
+    if loaded and dataset_key is not None:
+        df = DATA_CACHE[dataset_key]
+    else:
+        df = pd.DataFrame()
+    column_options = get_column_choices(df) if loaded else []
+    categorical_columns = [column for column in df.columns if infer_column_kind(df, column) == "categorical"] if loaded else []
+    numeric_columns = [column for column in df.columns if infer_column_kind(df, column) == "numeric"] if loaded else []
+    date_columns = [column for column in df.columns if infer_column_kind(df, column) == "date"] if loaded else []
+
+    if not loaded:
+        return html.Div("Charge d’abord un sous-ensemble de données pour activer les analyses.", className="empty-state")
+
+    x_default = None
+    y_default = None
+    x_kind = "unknown"
+    y_kind = "unknown"
+    compare_options = compare_plot_options(x_kind, y_kind)
+    date_default = date_columns[0] if date_columns else None
+    numeric_value_options = [{"label": "Aucune (count)", "value": ""}] + [{"label": col, "value": col} for col in numeric_columns]
+
+    if tab_value == "tab-eda":
+        eda_options = [{"label": "ALL (toutes les variables)", "value": "__ALL__"}] + column_options
+        return html.Div(
+            [
+                html.Div(
+                    [
+                        html.Div(
+                            [
+                                html.Label("Variable à explorer"),
+                                dcc.Dropdown(id="eda-variable", options=eda_options, value=None, placeholder="Choisis une variable"),
+                            ],
+                            className="control-card",
+                        ),
+                        html.Div(
+                            [
+                                html.Label("Type de graphique"),
+                                dcc.Dropdown(id="eda-plot-type", options=[{"label": "Auto", "value": "auto"}], value="auto"),
+                            ],
+                            className="control-card",
+                        ),
+                    ],
+                    className="controls-grid",
+                ),
+                html.Div(id="eda-filter-panel"),
+                html.Div(dcc.Graph(id="eda-graph", figure=build_empty_figure("Sélectionne une variable.")), className="graph-wrap"),
+                html.Div(id="eda-all-grid"),
+                html.Div(
+                    [
+                        html.Button("←", id="eda-all-prev", n_clicks=0, className="page-nav-button"),
+                        html.Div(id="eda-all-page-label", className="hint-text"),
+                        html.Button("→", id="eda-all-next", n_clicks=0, className="page-nav-button"),
+                    ],
+                    id="eda-all-pager",
+                    className="action-row",
+                    style={"justifyContent": "center", "gap": "12px", "marginTop": "8px", "marginBottom": "12px"},
+                ),
+                html.Div(id="eda-unique-values", style={"display": "none"}),
+                html.Div(
+                    [
+                        html.Button("←", id="eda-output-prev", n_clicks=0, className="page-nav-button"),
+                        html.Div(id="eda-output-page-label", className="hint-text"),
+                        html.Button("→", id="eda-output-next", n_clicks=0, className="page-nav-button"),
+                    ],
+                    id="eda-output-pager",
+                    className="action-row",
+                ),
+                html.Div(id="eda-output-table"),
+                dcc.Store(id="eda-all-page-store", data=1),
+                dcc.Store(id="eda-all-total-pages", data=1),
+                dcc.Store(id="eda-output-page-store", data=1),
+                dcc.Store(id="eda-output-total-pages", data=1),
+            ]
+        )
+
+    if tab_value == "tab-compare":
+        return html.Div(
+            [
+                html.Div(
+                    [
+                        html.Div([html.Label("X"), dcc.Dropdown(id="compare-x", options=column_options, value=x_default)], className="control-card"),
+                        html.Div([html.Label("Y"), dcc.Dropdown(id="compare-y", options=column_options, value=y_default)], className="control-card"),
+                        html.Div([html.Label("Hue"), dcc.Dropdown(id="compare-hue", options=[{"label": "Aucun", "value": ""}] + column_options, value="", clearable=False)], className="control-card"),
+                        html.Div([html.Label("Type de plot"), dcc.Dropdown(id="compare-plot-type", options=compare_options, value=compare_options[0]["value"] if compare_options else "auto")], className="control-card"),
+                    ],
+                    className="controls-grid",
+                ),
+                html.Div(id="compare-filter-panel"),
+                html.Div(dcc.Graph(id="compare-graph", figure=build_empty_figure("Choisis X et Y.")), className="graph-wrap"),
+                html.Div(id="compare-table-container"),
+            ]
+        )
+
+    if tab_value == "tab-kpi":
+        return html.Div(
+            [
+                html.Div(
+                    [
+                        html.Div([html.Label("Temporalité"), dcc.Dropdown(id="kpi-grain", options=[{"label": grain.title(), "value": grain} for grain in TIME_GRAINS], value="monthly")], className="control-card"),
+                        html.Div([html.Label("Date de référence (mois/année)"), dcc.Dropdown(id="kpi-date-col", options=[{"label": col, "value": col} for col in date_columns], value=date_default)], className="control-card"),
+                        html.Div([html.Label("Group by"), dcc.Dropdown(id="kpi-group-cols", options=column_options, multi=True, value=["COUNTRY"] if "COUNTRY" in df.columns else [])], className="control-card"),
+                        html.Div([html.Label("Mesure numérique (optionnel)"), dcc.Dropdown(id="kpi-value-col", options=numeric_value_options, value="")], className="control-card"),
+                        html.Div([html.Label("Agrégation"), dcc.Dropdown(id="kpi-agg-func", options=[{"label": value.title(), "value": value} for value in AGG_FUNCS], value="count")], className="control-card"),
+                        html.Div([html.Label("Style graphe"), dcc.Dropdown(id="kpi-chart-style", options=[{"label": "Auto", "value": "auto"}, {"label": "Barres groupées", "value": "bar"}, {"label": "Barres + lignes (%)", "value": "grouped-line"}, {"label": "Ligne seule", "value": "line"}, {"label": "Ligne douce", "value": "spline"}, {"label": "Ligne avec points", "value": "line-markers"}, {"label": "Aire", "value": "area"}, {"label": "Aire empilée", "value": "stacked-area"}], value="auto")], className="control-card"),
+                    ],
+                    className="controls-grid",
+                ),
+                html.Div(
+                    [
+                        html.Div(
+                            [
+                                html.Label("Période KPI (mois/année)"),
+                                build_month_year_range_block(
+                                    start_year_id="kpi-start-year",
+                                    start_month_id="kpi-start-month",
+                                    end_year_id="kpi-end-year",
+                                    end_month_id="kpi-end-month",
+                                    year_options=[],
+                                    start_year_value=None,
+                                    start_month_value=1,
+                                    end_year_value=None,
+                                    end_month_value=12,
+                                ),
+                            ],
+                            className="control-card",
+                        ),
+                    ],
+                    className="controls-grid",
+                ),
+                html.Div(
+                    [
+                        html.Div([html.Label("Pivot rows"), dcc.Dropdown(id="kpi-pivot-rows", options=[{"label": "Aucun", "value": ""}], value="", clearable=False)], className="control-card"),
+                        html.Div([html.Label("Pivot columns"), dcc.Dropdown(id="kpi-pivot-cols", options=[{"label": "Aucun", "value": ""}], value="", clearable=False)], className="control-card"),
+                    ],
+                    className="controls-grid",
+                ),
+                html.Div(id="kpi-filter-panel"),
+                html.Div(
+                    [
+                        html.Button("Construire KPI", id="run-kpi-button", n_clicks=0, className="primary-button"),
+                        html.Div(id="kpi-status", className="load-status kpi-status"),
+                    ],
+                    className="action-row kpi-action-row",
+                ),
+                html.Div(dcc.Graph(id="kpi-graph", figure=build_empty_figure("Construis ton KPI.")), className="graph-wrap"),
+                html.Div(id="kpi-table-container"),
+            ]
+        )
+
+    if tab_value == "tab-interactions":
+        return html.Div(
+            [
+                html.Div(
+                    [
+                        html.Div(
+                            [
+                                html.Label("Variable cible"),
+                                dcc.Dropdown(
+                                    id="interaction-target",
+                                    options=column_options,
+                                    value=None,
+                                    placeholder="Choisis une variable cible",
+                                ),
+                            ],
+                            className="control-card compact-card",
+                        ),
+                        html.Div(
+                            [
+                                html.Label("Variables pour corrélation"),
+                                dcc.Dropdown(
+                                    id="interaction-corr-vars",
+                                    options=[{"label": "ALL", "value": "__ALL__"}] + column_options,
+                                    value=None,
+                                    multi=True,
+                                    placeholder="ALL par défaut si vide",
+                                ),
+                                html.Div("ALL: matrice globale. 1 variable: focus cible vs autres. Plusieurs: mini-matrice sur la sélection.", className="filter-helper"),
+                            ],
+                            className="control-card compact-card",
+                        ),
+                    ],
+                    className="controls-grid insights-controls-grid",
+                ),
+                html.Div(
+                    [
+                        html.Div(dcc.Graph(id="interaction-main-graph", figure=build_empty_figure("Choisis une variable cible.")), className="graph-wrap"),
+                        html.Div(dcc.Graph(id="interaction-heatmap", figure=build_empty_figure("Matrice de corrélation encodée.")), className="graph-wrap"),
+                    ],
+                    className="interaction-grid",
+                ),
+                html.Div(
+                    [
+                        html.Div(id="interaction-ranking-table"),
+                    ],
+                    className="panel",
+                ),
+            ]
+        )
+
+    return html.Div(
+        [
+            html.H3("Prévisualisation"),
+            html.P("Vue brute des premières lignes après filtrage."),
+            html.Div(id="preview-table-container"),
+        ]
+    )
+
+
+@app.callback(
+    Output("eda-filter-panel", "children"),
+    Input("eda-variable", "value"),
+    Input("advanced-filter-store", "data"),
+    Input("dataset-key", "data"),
+)
+def render_eda_filter_panel(variable: str | None, advanced_filter_store: dict[str, Any] | None, dataset_key: str | None) -> html.Div:
+    if not dataset_key or dataset_key not in DATA_CACHE or not variable:
+        return html.Div()
+
+    if variable == "__ALL__":
+        return html.Div("Mode ALL: pas de filtre local unique. Les règles avancées du haut sont appliquées.", className="hint-text")
+
+    df = apply_advanced_filters(DATA_CACHE[dataset_key], advanced_filter_store)
+    if variable not in df.columns:
+        return html.Div()
+
+    kind = infer_column_kind(df, variable)
+    if kind == "categorical":
+        series = df[variable].fillna("<NA>").astype(str)
+        counts = safe_top_value_counts(series, MAX_CATEGORICAL_VALUES_FOR_SELECTOR)
+        unique_estimate = int(series.nunique(dropna=False))
+        options = [{"label": f"{truncate_label(idx, 15)} ({count})", "value": idx} for idx, count in counts.items()]
+        return html.Div(
+            [
+                html.Label("Filtre sur les valeurs de la variable"),
+                dcc.Checklist(
+                    id={"type": "eda-filter-all", "slot": "main"},
+                    options=[{"label": "All", "value": "all"}],
+                    value=[],
+                    inline=True,
+                ),
+                dcc.Dropdown(id={"type": "eda-filter-values", "slot": "main"}, options=options, value=[], multi=True, placeholder="Sélectionne une ou plusieurs valeurs"),
+                html.Div(
+                    f"Cardinalité: {unique_estimate:,} valeurs distinctes. Affichage limité aux modalités les plus fréquentes.".replace(",", " "),
+                    className="hint-text",
+                ),
+            ],
+            className="control-card",
+        )
+
+    if kind == "numeric":
+        numeric = pd.to_numeric(df[variable], errors="coerce").dropna()
+        if numeric.empty:
+            return html.Div()
+        min_v = float(numeric.min())
+        max_v = float(numeric.max())
+        return html.Div(
+            [
+                html.Label("Filtre numérique"),
+                dcc.RangeSlider(id={"type": "eda-filter-range", "slot": "main"}, min=min_v, max=max_v, value=[min_v, max_v], tooltip={"placement": "bottom", "always_visible": False}),
+            ],
+            className="control-card",
+        )
+
+    if kind == "date":
+        date_series = pd.to_datetime(df[variable], errors="coerce").dropna()
+        if date_series.empty:
+            return html.Div()
+        year_values = list(range(int(date_series.dt.year.min()), int(date_series.dt.year.max()) + 1))
+        year_opts = [{"label": str(year), "value": year} for year in year_values]
+        return html.Div(
+            [
+                html.Label("Filtre date"),
+                build_month_year_range_block(
+                    start_year_id={"type": "eda-filter-date-start-year", "slot": "main"},
+                    start_month_id={"type": "eda-filter-date-start-month", "slot": "main"},
+                    end_year_id={"type": "eda-filter-date-end-year", "slot": "main"},
+                    end_month_id={"type": "eda-filter-date-end-month", "slot": "main"},
+                    year_options=year_opts,
+                    start_year_value=year_values[0],
+                    start_month_value=int(date_series.dt.month.min()),
+                    end_year_value=year_values[-1],
+                    end_month_value=int(date_series.dt.month.max()),
+                ),
+            ],
+            className="control-card",
+        )
+
+    return html.Div()
+
+
+@app.callback(
+    Output("adv-rule-count", "data"),
+    Input("adv-add-rule-button", "n_clicks"),
+    State("adv-rule-count", "data"),
+    prevent_initial_call=True,
+)
+def add_advanced_rule(n_clicks: int, current_count: int | None) -> int:
+    current = current_count or ADV_FILTER_ROWS
+    if n_clicks <= 0:
+        return current
+    return min(MAX_ADV_FILTER_ROWS, current + 1)
+
+
+@app.callback(
+    Output("adv-rules-container", "children"),
+    Input("adv-rule-count", "data"),
+    Input("dataset-key", "data"),
+)
+def render_advanced_rules(rule_count: int | None, dataset_key: str | None) -> list[html.Div]:
+    count = max(ADV_FILTER_ROWS, int(rule_count or ADV_FILTER_ROWS))
+    options: list[dict[str, str]] = []
+    if dataset_key and dataset_key in DATA_CACHE:
+        options = get_column_choices(DATA_CACHE[dataset_key])
+    return [build_advanced_rule_card(i, options) for i in range(1, count + 1)]
+
+
+@app.callback(
+    Output({"type": "adv-operator", "row": MATCH}, "options"),
+    Output({"type": "adv-operator", "row": MATCH}, "value"),
+    Input({"type": "adv-column", "row": MATCH}, "value"),
+    Input("dataset-key", "data"),
+)
+def update_advanced_operator_for_row(column: str | None, dataset_key: str | None) -> tuple[list[dict[str, str]], str | None]:
+    if not dataset_key or dataset_key not in DATA_CACHE or not column:
+        return [], None
+    df = DATA_CACHE[dataset_key]
+    kind = infer_column_kind(df, column)
+    options = advanced_operator_options(kind)
+    return options, None
+
+
+@app.callback(
+    Output({"type": "adv-value-container", "row": MATCH}, "children"),
+    Input({"type": "adv-column", "row": MATCH}, "value"),
+    Input({"type": "adv-operator", "row": MATCH}, "value"),
+    Input({"type": "adv-column", "row": MATCH}, "id"),
+    Input("dataset-key", "data"),
+)
+def update_advanced_value_for_row(column: str | None, operator: str | None, row_id: dict[str, Any], dataset_key: str | None) -> html.Div:
+    if not dataset_key or dataset_key not in DATA_CACHE:
+        return html.Div()
+    row_index = int(row_id.get("row", 0))
+    return build_advanced_value_widget(row_index, DATA_CACHE[dataset_key], column, operator)
+
+
+@app.callback(
+    Output({"type": "adv-cat-values", "row": MATCH}, "value"),
+    Input({"type": "adv-cat-all", "row": MATCH}, "value"),
+    State({"type": "adv-cat-values", "row": MATCH}, "options"),
+    prevent_initial_call=True,
+)
+def select_all_advanced_category_values(all_value: list[str] | None, options: list[dict[str, Any]] | None) -> list[str]:
+    if not options or not all_value or "all" not in all_value:
+        return []
+    return [str(option.get("value")) for option in options if option.get("value") not in (None, "")]
+
+
+@app.callback(
+    Output({"type": "eda-filter-values", "slot": MATCH}, "value"),
+    Input({"type": "eda-filter-all", "slot": MATCH}, "value"),
+    State({"type": "eda-filter-values", "slot": MATCH}, "options"),
+    prevent_initial_call=True,
+)
+def select_all_eda_filter_values(all_value: list[str] | None, options: list[dict[str, Any]] | None) -> list[str]:
+    if not options or not all_value or "all" not in all_value:
+        return []
+    return [str(option.get("value")) for option in options if option.get("value") not in (None, "")]
+
+
+@app.callback(
+    Output({"type": "compare-filter-values", "slot": MATCH}, "value"),
+    Input({"type": "compare-filter-all", "slot": MATCH}, "value"),
+    State({"type": "compare-filter-values", "slot": MATCH}, "options"),
+    prevent_initial_call=True,
+)
+def select_all_compare_filter_values(all_value: list[str] | None, options: list[dict[str, Any]] | None) -> list[str]:
+    if not options or not all_value or "all" not in all_value:
+        return []
+    return [str(option.get("value")) for option in options if option.get("value") not in (None, "")]
+
+
+@app.callback(
+    Output({"type": "kpi-filter-values", "slot": MATCH}, "value"),
+    Input({"type": "kpi-filter-all", "slot": MATCH}, "value"),
+    State({"type": "kpi-filter-values", "slot": MATCH}, "options"),
+    prevent_initial_call=True,
+)
+def select_all_kpi_filter_values(all_value: list[str] | None, options: list[dict[str, Any]] | None) -> list[str]:
+    if not options or not all_value or "all" not in all_value:
+        return []
+    return [str(option.get("value")) for option in options if option.get("value") not in (None, "")]
+
+
+@app.callback(
+    Output("advanced-filter-store", "data"),
+    Output("adv-filter-summary", "children"),
+    Input("adv-filter-logic", "value"),
+    Input({"type": "adv-column", "row": ALL}, "id"),
+    Input({"type": "adv-column", "row": ALL}, "value"),
+    Input({"type": "adv-operator", "row": ALL}, "id"),
+    Input({"type": "adv-operator", "row": ALL}, "value"),
+    Input({"type": "adv-cat-values", "row": ALL}, "id"),
+    Input({"type": "adv-cat-values", "row": ALL}, "value"),
+    Input({"type": "adv-num-value", "row": ALL}, "id"),
+    Input({"type": "adv-num-value", "row": ALL}, "value"),
+    Input({"type": "adv-date-year", "row": ALL}, "id"),
+    Input({"type": "adv-date-year", "row": ALL}, "value"),
+    Input({"type": "adv-date-month", "row": ALL}, "id"),
+    Input({"type": "adv-date-month", "row": ALL}, "value"),
+    Input({"type": "adv-date-day", "row": ALL}, "id"),
+    Input({"type": "adv-date-day", "row": ALL}, "value"),
+    Input({"type": "adv-date-start-year", "row": ALL}, "id"),
+    Input({"type": "adv-date-start-year", "row": ALL}, "value"),
+    Input({"type": "adv-date-start-month", "row": ALL}, "id"),
+    Input({"type": "adv-date-start-month", "row": ALL}, "value"),
+    Input({"type": "adv-date-end-year", "row": ALL}, "id"),
+    Input({"type": "adv-date-end-year", "row": ALL}, "value"),
+    Input({"type": "adv-date-end-month", "row": ALL}, "id"),
+    Input({"type": "adv-date-end-month", "row": ALL}, "value"),
+    Input({"type": "adv-text-value", "row": ALL}, "id"),
+    Input({"type": "adv-text-value", "row": ALL}, "value"),
+    Input("dataset-key", "data"),
+)
+def sync_advanced_filter_store(
+    logic: str,
+    column_ids: list[dict[str, Any]],
+    column_values: list[str | None],
+    operator_ids: list[dict[str, Any]],
+    operator_values: list[str | None],
+    cat_ids: list[dict[str, Any]],
+    cat_values: list[list[str] | None],
+    num_value_ids: list[dict[str, Any]],
+    num_value_values: list[float | None],
+    date_year_ids: list[dict[str, Any]],
+    date_year_values: list[int | None],
+    date_month_ids: list[dict[str, Any]],
+    date_month_values: list[int | None],
+    date_day_ids: list[dict[str, Any]],
+    date_day_values: list[int | None],
+    date_start_year_ids: list[dict[str, Any]],
+    date_start_year_values: list[int | None],
+    date_start_month_ids: list[dict[str, Any]],
+    date_start_month_values: list[int | None],
+    date_end_year_ids: list[dict[str, Any]],
+    date_end_year_values: list[int | None],
+    date_end_month_ids: list[dict[str, Any]],
+    date_end_month_values: list[int | None],
+    text_ids: list[dict[str, Any]],
+    text_values: list[str | None],
+    dataset_key: str | None,
+) -> tuple[dict[str, Any], html.Div]:
+    if not dataset_key or dataset_key not in DATA_CACHE:
+        return {"logic": logic, "rules": []}, html.Div("Charge les données pour activer les filtres avancés.", className="filter-helper")
+
+    df = DATA_CACHE[dataset_key]
+    column_map = {int(item["row"]): value for item, value in zip(column_ids, column_values)}
+    operator_map = {int(item["row"]): value for item, value in zip(operator_ids, operator_values)}
+    cat_map = {int(item["row"]): value for item, value in zip(cat_ids, cat_values)}
+    num_value_map = {int(item["row"]): value for item, value in zip(num_value_ids, num_value_values)}
+    date_year_map = {int(item["row"]): value for item, value in zip(date_year_ids, date_year_values)}
+    date_month_map = {int(item["row"]): value for item, value in zip(date_month_ids, date_month_values)}
+    date_day_map = {int(item["row"]): value for item, value in zip(date_day_ids, date_day_values)} if date_day_ids else {}
+    date_start_year_map = {int(item["row"]): value for item, value in zip(date_start_year_ids, date_start_year_values)}
+    date_start_month_map = {int(item["row"]): value for item, value in zip(date_start_month_ids, date_start_month_values)}
+    date_end_year_map = {int(item["row"]): value for item, value in zip(date_end_year_ids, date_end_year_values)}
+    date_end_month_map = {int(item["row"]): value for item, value in zip(date_end_month_ids, date_end_month_values)}
+    text_map = {int(item["row"]): value for item, value in zip(text_ids, text_values)}
+
+    rules: list[dict[str, Any]] = []
+    for row_index in sorted(column_map.keys()):
+        column = column_map.get(row_index)
+        operator = operator_map.get(row_index)
+        if not column or column not in df.columns or not operator:
+            continue
+        kind = infer_column_kind(df, column)
+        if kind == "numeric":
+            value = num_value_map.get(row_index)
+        elif kind == "date":
+            if operator == "between":
+                value = {
+                    "start_year": date_start_year_map.get(row_index),
+                    "start_month": date_start_month_map.get(row_index),
+                    "end_year": date_end_year_map.get(row_index),
+                    "end_month": date_end_month_map.get(row_index),
+                }
+            else:
+                value = {
+                    "year": date_year_map.get(row_index),
+                    "month": date_month_map.get(row_index),
+                    "day": date_day_map.get(row_index),
+                }
+        elif kind == "categorical" and operator == "equals":
+            value = cat_map.get(row_index) or []
+        else:
+            text_value = text_map.get(row_index)
+            value = text_value or ""
+        rules.append({"row": row_index, "column": column, "kind": kind, "operator": operator, "value": value})
+
+    bundle = {"logic": logic or "AND", "rules": rules}
+    return bundle, html.Div(advanced_filter_summary(bundle), className="filter-helper")
+
+
+@app.callback(
+    Output("compare-filter-panel", "children"),
+    Input("compare-x", "value"),
+    Input("compare-y", "value"),
+    Input("dataset-key", "data"),
+)
+def render_compare_filter_panel(x_var: str | None, y_var: str | None, dataset_key: str | None) -> html.Div:
+    if not dataset_key or dataset_key not in DATA_CACHE:
+        return html.Div()
+
+    df = DATA_CACHE[dataset_key]
+    candidates = [column for column in [x_var, y_var] if column and column in df.columns]
+    if not candidates:
+        return html.Div()
+
+    filter_column = candidates[0]
+    kind = infer_column_kind(df, filter_column)
+    if kind == "categorical":
+        series = df[filter_column].fillna("<NA>").astype(str)
+        counts = safe_top_value_counts(series, MAX_CATEGORICAL_VALUES_FOR_SELECTOR)
+        unique_estimate = int(series.nunique(dropna=False))
+        options = [{"label": f"{truncate_label(idx, 42)} ({count})", "value": idx} for idx, count in counts.items()]
+        return html.Div(
+            [
+                html.Label(f"Filtre sur {filter_column}"),
+                dcc.Checklist(
+                    id={"type": "compare-filter-all", "slot": "main"},
+                    options=[{"label": "All", "value": "all"}],
+                    value=[],
+                    inline=True,
+                ),
+                dcc.Dropdown(id={"type": "compare-filter-values", "slot": "main"}, options=options, value=[], multi=True),
+                html.Div(
+                    f"Cardinalité: {unique_estimate:,}. Affichage top fréquences uniquement pour éviter une UI lourde.".replace(",", " "),
+                    className="hint-text",
+                ),
+            ],
+            className="control-card",
+        )
+    if kind == "numeric":
+        numeric = pd.to_numeric(df[filter_column], errors="coerce").dropna()
+        if numeric.empty:
+            return html.Div()
+        return html.Div(
+            [
+                html.Label(f"Filtre numérique sur {filter_column}"),
+                dcc.RangeSlider(id={"type": "compare-filter-range", "slot": "main"}, min=float(numeric.min()), max=float(numeric.max()), value=[float(numeric.min()), float(numeric.max())]),
+            ],
+            className="control-card",
+        )
+    if kind == "date":
+        return html.Div(
+            [
+                html.Label(f"Filtre date sur {filter_column}"),
+                html.Div("Pas de filtre start/end en mode Comparer pour les axes temporels.", className="hint-text"),
+            ],
+            className="control-card",
+        )
+    return html.Div()
+
+
+@app.callback(
+    Output("kpi-filter-panel", "children"),
+    Input("kpi-group-cols", "value"),
+    Input("dataset-key", "data"),
+)
+def render_kpi_filter_panel(group_cols: list[str] | None, dataset_key: str | None) -> html.Div:
+    if not dataset_key or dataset_key not in DATA_CACHE:
+        return html.Div()
+
+    df = DATA_CACHE[dataset_key]
+    if not group_cols:
+        return html.Div()
+
+    candidate = group_cols[0]
+    if candidate not in df.columns:
+        return html.Div()
+
+    kind = infer_column_kind(df, candidate)
+    if kind == "categorical":
+        series = df[candidate].fillna("<NA>").astype(str)
+        counts = safe_top_value_counts(series, MAX_CATEGORICAL_VALUES_FOR_SELECTOR)
+        unique_estimate = int(series.nunique(dropna=False))
+        options = [{"label": f"{truncate_label(idx, 42)} ({count})", "value": idx} for idx, count in counts.items()]
+        return html.Div(
+            [
+                html.Label(f"Filtre métier sur {candidate}"),
+                dcc.Checklist(
+                    id={"type": "kpi-filter-all", "slot": "main"},
+                    options=[{"label": "All", "value": "all"}],
+                    value=[],
+                    inline=True,
+                ),
+                dcc.Dropdown(id={"type": "kpi-filter-values", "slot": "main"}, options=options, value=[], multi=True),
+                html.Div(
+                    f"Cardinalité: {unique_estimate:,}. Affichage limité aux valeurs les plus fréquentes.".replace(",", " "),
+                    className="hint-text",
+                ),
+            ],
+            className="control-card",
+        )
+    if kind == "numeric":
+        numeric = pd.to_numeric(df[candidate], errors="coerce").dropna()
+        if numeric.empty:
+            return html.Div()
+        return html.Div(
+            [
+                html.Label(f"Filtre numérique sur {candidate}"),
+                dcc.RangeSlider(id={"type": "kpi-filter-range", "slot": "main"}, min=float(numeric.min()), max=float(numeric.max()), value=[float(numeric.min()), float(numeric.max())]),
+            ],
+            className="control-card",
+        )
+    if kind == "date":
+        date_series = pd.to_datetime(df[candidate], errors="coerce").dropna()
+        if date_series.empty:
+            return html.Div()
+        year_values = list(range(int(date_series.dt.year.min()), int(date_series.dt.year.max()) + 1))
+        year_opts = [{"label": str(year), "value": year} for year in year_values]
+        return html.Div(
+            [
+                html.Label(f"Filtre date sur {candidate}"),
+                build_month_year_range_block(
+                    start_year_id={"type": "kpi-filter-date-start-year", "slot": "main"},
+                    start_month_id={"type": "kpi-filter-date-start-month", "slot": "main"},
+                    end_year_id={"type": "kpi-filter-date-end-year", "slot": "main"},
+                    end_month_id={"type": "kpi-filter-date-end-month", "slot": "main"},
+                    year_options=year_opts,
+                    start_year_value=year_values[0],
+                    start_month_value=int(date_series.dt.month.min()),
+                    end_year_value=year_values[-1],
+                    end_month_value=int(date_series.dt.month.max()),
+                ),
+            ],
+            className="control-card",
+        )
+    return html.Div()
+
+
+@app.callback(
+    Output("compare-plot-type", "options"),
+    Output("compare-plot-type", "value"),
+    Input("compare-x", "value"),
+    Input("compare-y", "value"),
+    State("dataset-key", "data"),
+)
+def update_compare_plot_options(x_var: str | None, y_var: str | None, dataset_key: str | None) -> tuple[list[dict[str, str]], str]:
+    if not dataset_key or dataset_key not in DATA_CACHE:
+        return [{"label": "Auto", "value": "auto"}], "auto"
+    df = DATA_CACHE[dataset_key]
+    if not x_var or not y_var or x_var not in df.columns or y_var not in df.columns:
+        return [{"label": "Auto", "value": "auto"}], "auto"
+    x_kind = infer_column_kind(df, x_var)
+    y_kind = infer_column_kind(df, y_var)
+    options = compare_plot_options(x_kind, y_kind)
+    return options, options[0]["value"] if options else "auto"
+
+
+@app.callback(
+    Output("kpi-start-year", "options"),
+    Output("kpi-start-year", "value"),
+    Output("kpi-end-year", "options"),
+    Output("kpi-end-year", "value"),
+    Input("kpi-date-col", "value"),
+    Input("dataset-key", "data"),
+)
+def update_kpi_year_bounds(date_col: str | None, dataset_key: str | None) -> tuple[list[dict[str, int]], int | None, list[dict[str, int]], int | None]:
+    if not dataset_key or dataset_key not in DATA_CACHE or not date_col:
+        return [], None, [], None
+
+    df = DATA_CACHE[dataset_key]
+    if date_col not in df.columns:
+        return [], None, [], None
+
+    years = pd.to_datetime(df[date_col], errors="coerce").dt.year.dropna().astype(int)
+    if years.empty:
+        return [], None, [], None
+    year_values = sorted(years.unique().tolist())
+    options = [{"label": str(year), "value": year} for year in year_values]
+    return options, year_values[0], options, year_values[-1]
+
+
+@app.callback(
+    Output("eda-all-pager", "style"),
+    Output("eda-output-pager", "style"),
+    Input("eda-variable", "value"),
+    Input("eda-all-total-pages", "data"),
+    Input("eda-output-total-pages", "data"),
+)
+def toggle_eda_all_controls(variable: str | None, all_total_pages: int | None, output_total_pages: int | None) -> tuple[dict[str, str], dict[str, str]]:
+    show_all = variable == "__ALL__" and int(all_total_pages or 1) > 1
+    show_output = variable not in (None, "__ALL__") and int(output_total_pages or 1) > 1
+    all_style = {"display": "flex", "justifyContent": "center", "gap": "12px", "marginTop": "8px", "marginBottom": "12px"} if show_all else {"display": "none"}
+    out_style = {"display": "flex", "justifyContent": "center", "gap": "12px", "marginTop": "8px", "marginBottom": "12px"} if show_output else {"display": "none"}
+    return all_style, out_style
+
+
+@app.callback(
+    Output("eda-all-page-store", "data"),
+    Output("eda-all-total-pages", "data"),
+    Output("eda-all-page-label", "children"),
+    Input("eda-all-prev", "n_clicks"),
+    Input("eda-all-next", "n_clicks"),
+    Input("eda-variable", "value"),
+    Input("dataset-key", "data"),
+    State("eda-all-page-store", "data"),
+)
+def update_eda_all_page_state(
+    prev_clicks: int,
+    next_clicks: int,
+    variable: str | None,
+    dataset_key: str | None,
+    current_page: int | None,
+) -> tuple[int, int, str]:
+    if variable != "__ALL__" or not dataset_key or dataset_key not in DATA_CACHE:
+        return 1, 1, ""
+
+    size = 12
+    n_cols = max(1, len(DATA_CACHE[dataset_key].columns))
+    total_pages = max(1, int(np.ceil(n_cols / size)))
+    page = max(1, min(int(current_page or 1), total_pages))
+
+    trigger = ctx.triggered_id
+    if trigger == "eda-all-prev":
+        page = max(1, page - 1)
+    elif trigger == "eda-all-next":
+        page = min(total_pages, page + 1)
+    elif trigger in {"dataset-key", "eda-variable"}:
+        page = 1
+
+    return page, total_pages, f"Page {page}/{total_pages}"
+
+
+@app.callback(
+    Output("eda-output-page-store", "data"),
+    Output("eda-output-page-label", "children"),
+    Input("eda-output-prev", "n_clicks"),
+    Input("eda-output-next", "n_clicks"),
+    Input("eda-variable", "value"),
+    Input("dataset-key", "data"),
+    Input("advanced-filter-store", "data"),
+    State("eda-output-page-store", "data"),
+)
+def update_eda_output_page_state(
+    prev_clicks: int,
+    next_clicks: int,
+    variable: str | None,
+    dataset_key: str | None,
+    advanced_filter_store: dict[str, Any] | None,
+    current_page: int | None,
+) -> tuple[int, str]:
+    if not dataset_key or dataset_key not in DATA_CACHE or variable in (None, "__ALL__"):
+        return 1, ""
+
+    df = apply_advanced_filters(DATA_CACHE[dataset_key], advanced_filter_store)
+    pages = eda_output_total_pages(df, variable, page_size=12)
+    pages = max(1, int(pages))
+
+    page = max(1, min(int(current_page or 1), pages))
+    trigger = ctx.triggered_id
+    if trigger == "eda-output-prev":
+        page = max(1, page - 1)
+    elif trigger == "eda-output-next":
+        page = min(pages, page + 1)
+    elif trigger in {"eda-variable", "dataset-key"}:
+        page = 1
+
+    return page, f"Page {page}/{pages}"
+
+
+@app.callback(
+    Output("eda-graph", "figure"),
+    Output("eda-graph", "style"),
+    Output("eda-all-grid", "children"),
+    Output("eda-unique-values", "children"),
+    Output("eda-output-table", "children"),
+    Output("eda-output-total-pages", "data"),
+    Input("eda-variable", "value"),
+    Input("eda-plot-type", "value"),
+    Input("eda-all-page-store", "data"),
+    Input("eda-output-page-store", "data"),
+    Input({"type": "eda-filter-values", "slot": ALL}, "value"),
+    Input({"type": "eda-filter-range", "slot": ALL}, "value"),
+    Input({"type": "eda-filter-date-start-year", "slot": ALL}, "value"),
+    Input({"type": "eda-filter-date-start-month", "slot": ALL}, "value"),
+    Input({"type": "eda-filter-date-end-year", "slot": ALL}, "value"),
+    Input({"type": "eda-filter-date-end-month", "slot": ALL}, "value"),
+    Input("advanced-filter-store", "data"),
+    Input("dataset-key", "data"),
+)
+def update_eda_graph(
+    variable: str | None,
+    plot_type: str,
+    all_page: int | None,
+    output_page: int | None,
+    filter_values_all: list[list[str] | None],
+    filter_range_all: list[list[float] | None],
+    filter_start_year_all: list[int | None],
+    filter_start_month_all: list[int | None],
+    filter_end_year_all: list[int | None],
+    filter_end_month_all: list[int | None],
+    advanced_filter_store: dict[str, Any] | None,
+    dataset_key: str | None,
+) -> tuple[go.Figure, dict[str, str], html.Div, html.Div, html.Div, int]:
+    if not dataset_key or dataset_key not in DATA_CACHE:
+        return build_empty_figure("Charge les données."), {"display": "none"}, html.Div(), html.Div(), html.Div(), 1
+
+    df = apply_advanced_filters(DATA_CACHE[dataset_key], advanced_filter_store)
+    if not variable:
+        return build_empty_figure("Sélectionne une variable."), {"display": "none"}, html.Div(), html.Div(), html.Div(), 1
+
+    if variable == "__ALL__":
+        total_pages = max(1, int(np.ceil(max(1, len(df.columns)) / 12)))
+        return (
+            go.Figure(),
+            {"display": "none"},
+            build_all_variables_grid(df, page=int(all_page or 1), page_size=12),
+            html.Div(),
+            html.Div(),
+            total_pages,
+        )
+
+    if variable not in df.columns:
+        return build_empty_figure("Sélectionne une variable."), {"display": "block"}, html.Div(), html.Div(), html.Div(), 1
+
+    filter_values = first_or_none(filter_values_all)
+    filter_range = first_or_none(filter_range_all)
+    filter_date_start = month_year_to_start(first_or_none(filter_start_year_all), first_or_none(filter_start_month_all))
+    filter_date_end = month_year_to_end(first_or_none(filter_end_year_all), first_or_none(filter_end_month_all))
+
+    mask = pd.Series(True, index=df.index)
+    kind = infer_column_kind(df, variable)
+    if kind == "categorical" and filter_values:
+        mask &= df[variable].fillna("<NA>").astype(str).isin(filter_values)
+    elif kind == "numeric" and filter_range:
+        numeric = pd.to_numeric(df[variable], errors="coerce")
+        mask &= numeric >= float(filter_range[0])
+        mask &= numeric <= float(filter_range[1])
+    elif kind == "date" and (filter_date_start or filter_date_end):
+        dt = pd.to_datetime(df[variable], errors="coerce")
+        if filter_date_start is not None:
+            mask &= dt >= filter_date_start
+        if filter_date_end is not None:
+            mask &= dt <= filter_date_end
+
+    filtered = df.loc[mask].copy()
+    if filtered.empty:
+        return build_empty_figure("Aucune ligne après filtre."), {"display": "block"}, html.Div(), html.Div(), html.Div("Aucune ligne à afficher.", className="empty-state"), 1
+
+    fig = build_eda_figure(filtered, variable, plot_type)
+    out_table, out_pages = build_eda_output_table(filtered, variable, page=int(output_page or 1), page_size=12)
+    return fig, {"display": "block"}, html.Div(), html.Div(), out_table, out_pages
+
+
+@app.callback(
+    Output("eda-plot-type", "options"),
+    Output("eda-plot-type", "value"),
+    Input("eda-variable", "value"),
+    Input("dataset-key", "data"),
+)
+def update_eda_plot_options(variable: str | None, dataset_key: str | None) -> tuple[list[dict[str, str]], str]:
+    if not dataset_key or dataset_key not in DATA_CACHE or not variable:
+        return [{"label": "Auto", "value": "auto"}], "auto"
+
+    if variable == "__ALL__":
+        return [{"label": "Auto", "value": "auto"}], "auto"
+
+    df = DATA_CACHE[dataset_key]
+    if variable not in df.columns:
+        return [{"label": "Auto", "value": "auto"}], "auto"
+
+    options = eda_plot_options(infer_column_kind(df, variable))
+    return options, options[0]["value"] if options else "auto"
+
+
+@app.callback(
+    Output("compare-graph", "figure"),
+    Output("compare-table-container", "children"),
+    Input("compare-x", "value"),
+    Input("compare-y", "value"),
+    Input("compare-hue", "value"),
+    Input("compare-plot-type", "value"),
+    Input({"type": "compare-filter-values", "slot": ALL}, "value"),
+    Input({"type": "compare-filter-range", "slot": ALL}, "value"),
+    Input("advanced-filter-store", "data"),
+    Input("dataset-key", "data"),
+)
+def update_compare_graph(
+    x_var: str | None,
+    y_var: str | None,
+    hue: str | None,
+    plot_type: str,
+    filter_values_all: list[list[str] | None],
+    filter_range_all: list[list[float] | None],
+    advanced_filter_store: dict[str, Any] | None,
+    dataset_key: str | None,
+) -> tuple[go.Figure, html.Div]:
+    if not dataset_key or dataset_key not in DATA_CACHE:
+        return build_empty_figure("Charge les données."), html.Div()
+
+    df = apply_advanced_filters(DATA_CACHE[dataset_key], advanced_filter_store)
+    if not x_var or not y_var or x_var not in df.columns or y_var not in df.columns:
+        return build_empty_figure("Choisis X et Y."), html.Div()
+
+    filter_values = first_or_none(filter_values_all)
+    filter_range = first_or_none(filter_range_all)
+    mask = pd.Series(True, index=df.index)
+    filter_candidates = [column for column in [x_var, y_var] if column in df.columns]
+    if filter_candidates:
+        filter_column = filter_candidates[0]
+        kind = infer_column_kind(df, filter_column)
+        if kind == "categorical" and filter_values:
+            mask &= df[filter_column].fillna("<NA>").astype(str).isin(filter_values)
+        elif kind == "numeric" and filter_range:
+            numeric = pd.to_numeric(df[filter_column], errors="coerce")
+            mask &= numeric >= float(filter_range[0])
+            mask &= numeric <= float(filter_range[1])
+
+    filtered = df.loc[mask].copy()
+    if filtered.empty:
+        return build_empty_figure("Aucune ligne après filtre."), html.Div()
+
+    fig = build_compare_figure(filtered, x_var, y_var, hue if hue else None, plot_type)
+    
+    # Prépare les données pour le tableau
+    cols_to_show = [col for col in [x_var, y_var, hue] if col and col in filtered.columns]
+    table_df = filtered[cols_to_show].dropna(how="any").copy()
+    
+    if table_df.empty:
+        table_component = html.Div("Aucune donnée valide pour ces variables.", className="empty-state")
+    else:
+        table_component = html.Div(
+            [
+                html.H4("Aperçu des données utilisées pour ce graphique", style={"marginBottom": "10px", "marginTop": "10px"}),
+                build_preview_table(table_df, max_rows=100)
+            ],
+            style={"marginTop": "20px"}
+        )
+        
+    return fig, table_component
+
+
+@app.callback(
+    Output("kpi-graph", "figure"),
+    Output("kpi-table-container", "children"),
+    Output("kpi-status", "children"),
+    Input("run-kpi-button", "n_clicks"),
+    State("kpi-grain", "value"),
+    State("kpi-date-col", "value"),
+    State("kpi-group-cols", "value"),
+    State("kpi-value-col", "value"),
+    State("kpi-agg-func", "value"),
+    State("kpi-chart-style", "value"),
+    State("kpi-start-year", "value"),
+    State("kpi-start-month", "value"),
+    State("kpi-end-year", "value"),
+    State("kpi-end-month", "value"),
+    State("kpi-pivot-rows", "value"),
+    State("kpi-pivot-cols", "value"),
+    State({"type": "kpi-filter-values", "slot": ALL}, "value"),
+    State({"type": "kpi-filter-range", "slot": ALL}, "value"),
+    State({"type": "kpi-filter-date-start-year", "slot": ALL}, "value"),
+    State({"type": "kpi-filter-date-start-month", "slot": ALL}, "value"),
+    State({"type": "kpi-filter-date-end-year", "slot": ALL}, "value"),
+    State({"type": "kpi-filter-date-end-month", "slot": ALL}, "value"),
+    State("advanced-filter-store", "data"),
+    State("dataset-key", "data"),
+    prevent_initial_call=True,
+)
+def update_kpi(
+    n_clicks: int,
+    grain: str,
+    date_col: str | None,
+    group_cols: list[str] | None,
+    value_col: str | None,
+    agg_func: str,
+    chart_style: str,
+    start_year: int | None,
+    start_month: int | None,
+    end_year: int | None,
+    end_month: int | None,
+    pivot_rows: str | None,
+    pivot_cols: str | None,
+    filter_values_all: list[list[str] | None],
+    filter_range_all: list[list[float] | None],
+    filter_start_year_all: list[int | None],
+    filter_start_month_all: list[int | None],
+    filter_end_year_all: list[int | None],
+    filter_end_month_all: list[int | None],
+    advanced_filter_store: dict[str, Any] | None,
+    dataset_key: str | None,
+) -> tuple[go.Figure, html.Div, str]:
+    if not dataset_key or dataset_key not in DATA_CACHE:
+        raise PreventUpdate
+
+    df = apply_advanced_filters(DATA_CACHE[dataset_key], advanced_filter_store)
+    if df.empty:
+        return build_empty_figure("Aucune donnée."), html.Div(), "Aucune donnée chargée"
+    if not date_col or date_col not in df.columns:
+        return build_empty_figure("Choisis une colonne date."), html.Div(), "Choisis une colonne date"
+
+    filter_values = first_or_none(filter_values_all)
+    filter_range = first_or_none(filter_range_all)
+    filter_date_start = month_year_to_start(first_or_none(filter_start_year_all), first_or_none(filter_start_month_all))
+    filter_date_end = month_year_to_end(first_or_none(filter_end_year_all), first_or_none(filter_end_month_all))
+
+    working = df.copy()
+    date_series = pd.to_datetime(working[date_col], errors="coerce")
+    if start_year is not None and start_month is not None:
+        start_ts = pd.Timestamp(year=int(start_year), month=int(start_month), day=1)
+        working = working[date_series >= start_ts]
+    if end_year is not None and end_month is not None:
+        end_ts = pd.Timestamp(year=int(end_year), month=int(end_month), day=1) + pd.offsets.MonthEnd(1)
+        working = working[date_series <= end_ts]
+        if start_year is not None and start_month is not None and start_ts > end_ts:
+            return build_empty_figure("Période invalide: début > fin."), html.Div(), "Période invalide"
+
+    if group_cols:
+        filter_candidate = group_cols[0]
+        kind = infer_column_kind(working, filter_candidate)
+        if kind == "categorical" and filter_values:
+            working = working[working[filter_candidate].fillna("<NA>").astype(str).isin(filter_values)]
+        elif kind == "numeric" and filter_range:
+            numeric = pd.to_numeric(working[filter_candidate], errors="coerce")
+            working = working[(numeric >= float(filter_range[0])) & (numeric <= float(filter_range[1]))]
+        elif kind == "date" and (filter_date_start or filter_date_end):
+            dt = pd.to_datetime(working[filter_candidate], errors="coerce")
+            if filter_date_start is not None:
+                working = working[dt >= filter_date_start]
+            if filter_date_end is not None:
+                working = working[dt <= filter_date_end]
+
+    pivot_candidates = [column for column in [date_col] + list(group_cols or []) if column and column in working.columns]
+    pivot_rows_resolved = pivot_rows if pivot_rows in pivot_candidates else (pivot_candidates[0] if pivot_candidates else None)
+    pivot_cols_resolved = pivot_cols if pivot_cols in pivot_candidates and pivot_cols != pivot_rows_resolved else None
+    if pivot_cols_resolved is None:
+        for candidate in pivot_candidates:
+            if candidate != pivot_rows_resolved:
+                pivot_cols_resolved = candidate
+                break
+
+    try:
+        pivot_df, chart = build_kpi_table(
+            working,
+            grain=grain,
+            date_col=date_col,
+            group_cols=group_cols or [],
+            value_col=value_col if value_col else None,
+            agg_func=agg_func,
+            pivot_rows=pivot_rows_resolved,
+            pivot_cols=pivot_cols_resolved,
+            chart_style=chart_style or "line",
+        )
+    except Exception as exc:
+        return build_empty_figure(f"Erreur KPI: {exc}"), html.Div(), f"Erreur: {exc}"
+
+    table = build_preview_table(pivot_df, max_rows=100)
+    status = f"KPI construit: {len(pivot_df):,} lignes".replace(",", " ")
+    if grain == "monthly" and "TIME_BUCKET" in pivot_df.columns and pivot_df["TIME_BUCKET"].nunique() > MAX_KPI_CHART_POINTS:
+        status += f" | graphe limité aux {MAX_KPI_CHART_POINTS} derniers mois"
+    return chart, table, status
+
+
+@app.callback(
+    Output("kpi-pivot-rows", "options"),
+    Output("kpi-pivot-cols", "options"),
+    Output("kpi-pivot-rows", "value"),
+    Output("kpi-pivot-cols", "value"),
+    Input("kpi-date-col", "value"),
+    Input("kpi-group-cols", "value"),
+    Input("dataset-key", "data"),
+    State("kpi-pivot-rows", "value"),
+    State("kpi-pivot-cols", "value"),
+)
+def update_kpi_pivot_options(
+    date_col: str | None,
+    group_cols: list[str] | None,
+    dataset_key: str | None,
+    current_rows: str | None,
+    current_cols: str | None,
+) -> tuple[list[dict[str, str]], list[dict[str, str]], str, str]:
+    options = [{"label": "Aucun", "value": ""}]
+    if not dataset_key or dataset_key not in DATA_CACHE:
+        return options, options, "", ""
+
+    df = DATA_CACHE[dataset_key]
+    selected_columns: list[str] = []
+    if date_col and date_col in df.columns:
+        selected_columns.append(date_col)
+    for column in group_cols or []:
+        if column in df.columns and column not in selected_columns:
+            selected_columns.append(column)
+
+    options = [{"label": column, "value": column} for column in selected_columns]
+    options = ([{"label": "Aucun", "value": ""}] + options) if options else [{"label": "Aucun", "value": ""}]
+
+    valid_values = {option["value"] for option in options}
+    rows_value = current_rows if current_rows in valid_values else ""
+    cols_value = current_cols if current_cols in valid_values and current_cols != rows_value else ""
+    if not cols_value:
+        for column in selected_columns:
+            if column != rows_value:
+                cols_value = column
+                break
+
+    return options, options, rows_value, cols_value
+
+
+@app.callback(
+    Output("preview-table-container", "children"),
+    Input("dataset-key", "data"),
+    Input("advanced-filter-store", "data"),
+)
+def update_preview(dataset_key: str | None, advanced_filter_store: dict[str, Any] | None) -> html.Div:
+    if not dataset_key or dataset_key not in DATA_CACHE:
+        return html.Div("Charge les données pour voir l'aperçu.", className="empty-state")
+    return build_preview_table(apply_advanced_filters(DATA_CACHE[dataset_key], advanced_filter_store), max_rows=80)
+
+
+@app.callback(
+    Output("interaction-main-graph", "figure"),
+    Output("interaction-heatmap", "figure"),
+    Output("interaction-ranking-table", "children"),
+    Input("interaction-target", "value"),
+    Input("interaction-corr-vars", "value"),
+    Input("advanced-filter-store", "data"),
+    Input("dataset-key", "data"),
+)
+def update_interactions(
+    target_column: str | None,
+    corr_columns: list[str] | None,
+    advanced_filter_store: dict[str, Any] | None,
+    dataset_key: str | None,
+) -> tuple[go.Figure, go.Figure, html.Div]:
+    if not dataset_key or dataset_key not in DATA_CACHE:
+        return build_empty_figure("Charge les données."), build_empty_figure("Matrice de corrélation encodée."), html.Div()
+
+    df = apply_advanced_filters(DATA_CACHE[dataset_key], advanced_filter_store)
+    if df.empty:
+        return build_empty_figure("Aucune donnée après filtres."), build_empty_figure("Aucune donnée après filtres."), html.Div("Aucune donnée après filtres.", className="empty-state")
+
+    selected_corr_columns = [column for column in (corr_columns or []) if column]
+    if not selected_corr_columns:
+        heatmap = build_empty_figure("Choisis des variables de corrélation (ou ALL).")
+    else:
+        if "__ALL__" in selected_corr_columns and len(selected_corr_columns) > 1:
+            selected_corr_columns = [column for column in selected_corr_columns if column != "__ALL__"]
+        heatmap = build_encoded_correlation_figure(df, selected_columns=selected_corr_columns, max_cols=MAX_INTERACTION_CORR_COLS)
+
+    ranking_table: html.Div | Any = html.Div("Choisis une variable cible pour voir le ranking corrélé.", className="hint-text")
+    if not target_column or target_column not in df.columns:
+        return build_empty_figure("Choisis une variable cible."), heatmap, ranking_table
+
+    top_df = compute_focal_correlation_scores(df, target_column, max_cols=MAX_INTERACTION_CORR_COLS)
+    if top_df.empty:
+        return build_empty_figure("Corrélation indisponible pour cette cible."), heatmap, html.Div("Aucune corrélation exploitable.", className="empty-state")
+
+    main_fig = px.bar(
+        top_df,
+        x="VARIABLE",
+        y="CORR",
+        color="CORR",
+        color_continuous_scale="RdBu",
+        range_color=[-1, 1],
+        title=f"Corrélation encodée de {target_column} avec les autres",
+    )
+    main_fig.update_layout(template="plotly_white")
+    main_fig.update_xaxes(tickangle=30)
+
+    ranking_table = build_preview_table(top_df[["VARIABLE", "CORR", "ABS_CORR"]], max_rows=12)
+    return main_fig, heatmap, ranking_table
+
 
 if __name__ == "__main__":
-    app.run(debug=True, port=8051)
+    app.run(debug=True, host="127.0.0.1", port=8050)
