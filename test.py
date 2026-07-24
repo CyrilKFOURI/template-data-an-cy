@@ -67,8 +67,18 @@ COUNTRY_CODE_TO_NAME = {
 # kpi_pv_lcv() only recognises the literal strings "PV" and "LCV"/"LV". Only code
 # 1 and code 4 / "VU" map onto those; every other code (station wagon, vans,
 # medium/heavy CV, minibus, blank) correctly counts as neither, exactly like today.
+# Some countries already store these as text labels rather than numeric codes
+# (e.g. "Station wagon"), so every label is also recognised as itself — this
+# doesn't change PV/LCV counting (none of these labels count as either), it
+# just avoids mislabelling them "NOT IDENTIFIED" in the diagnostic output.
 CLS_VEHICLE_TYPE_TEXT_MAP = {
     "PV": "PV", "LCV": "LCV", "LV": "LV", "VU": "LCV",
+    "STATION WAGON": "STATION WAGON",
+    "VANS": "VANS",
+    "MEDIUM-DUTY CV": "MEDIUM-DUTY CV",
+    "HCV": "HCV",
+    "MINIBUS / PEOPLE MOVER": "MINIBUS / PEOPLE MOVER",
+    "CV WITH TRUCK REGISTRATION": "CV WITH TRUCK REGISTRATION",
 }
 CLS_VEHICLE_TYPE_CODE_MAP = {
     "1": "PV",
@@ -220,9 +230,14 @@ def main():
             df.loc[idx, "PV"]  = pv
             df.loc[idx, "LCV"] = lcv
 
-        still_zero = ((df.loc[rows_to_fix.index, "PV"] == 0) & (df.loc[rows_to_fix.index, "LCV"] == 0)).sum()
-        print(f"  [{country_code} {year}] recomputed {len(rows_to_fix):,} rows "
-              f"({still_zero} still 0/0 — genuinely empty subsets)")
+        fixed_slice = df.loc[rows_to_fix.index, ["MONTH", "BIKE_OR_CAR", "ASSET_STATUS", "DATE_MODE", "PV", "LCV"]]
+        still_zero = ((fixed_slice["PV"] == 0) & (fixed_slice["LCV"] == 0)).sum()
+        n_fixed = len(rows_to_fix) - still_zero
+        print(f"  [{country_code} {year}] recomputed {len(rows_to_fix):,} rows: "
+              f"{n_fixed:,} now have a real PV/LCV split, "
+              f"{still_zero:,} are still 0/0 (genuinely empty subset for that filter combo).")
+        print(f"  [{country_code} {year}] sample of the recomputed rows:")
+        print(fixed_slice.head(5).to_string(index=False))
 
     df.to_parquet(OUTPUT_PATH, index=False)
     print(f"\nWrote {OUTPUT_PATH} in {time.time() - t0:.1f}s")
