@@ -161,6 +161,36 @@ def load_existing_view1() -> pd.DataFrame:
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
 
+def _load_country_data_safe(country_name: str, country_code: str, year) -> pd.DataFrame:
+    """Reload raw NOVA data for one country, tolerating per-country schema
+    differences instead of letting one bad file abort the whole batch — a
+    country whose parquet is missing a column from fmd.COLUMNS_TO_READ (or has
+    any other read error) is skipped with a clear message, not a crash."""
+    try:
+        return fmd.load_country_monthly_data(
+            folder_path=str(DATA_FOLDER),
+            countries=[country_name],
+            start_yyyymm=START_YYYYMM,
+            end_yyyymm=END_YYYYMM,
+            cols=fmd.COLUMNS_TO_READ,
+        )
+    except Exception as e:
+        print(f"  [{country_code} {year}] column-scoped read failed ({e!r}), "
+              f"retrying with all columns...")
+    try:
+        return fmd.load_country_monthly_data(
+            folder_path=str(DATA_FOLDER),
+            countries=[country_name],
+            start_yyyymm=START_YYYYMM,
+            end_yyyymm=END_YYYYMM,
+            cols=None,
+        )
+    except Exception as e:
+        print(f"  [{country_code} {year}] no raw NOVA data could be read for "
+              f"'{country_name}' ({e!r}) — leaving these rows as-is")
+        return pd.DataFrame()
+
+
 def main():
     t0 = time.time()
     df = load_existing_view1()
@@ -188,16 +218,8 @@ def main():
     df = df.copy()
     for country_code, year in affected.itertuples(index=False):
         country_name = COUNTRY_CODE_TO_NAME.get(str(country_code).upper(), country_code)
-        raw = fmd.load_country_monthly_data(
-            folder_path=str(DATA_FOLDER),
-            countries=[country_name],
-            start_yyyymm=START_YYYYMM,
-            end_yyyymm=END_YYYYMM,
-            cols=fmd.COLUMNS_TO_READ,
-        )
+        raw = _load_country_data_safe(country_name, country_code, year)
         if raw.empty:
-            print(f"  [{country_code} {year}] no raw NOVA data found for "
-                  f"'{country_name}' — leaving these rows as-is")
             continue
 
         prepped = fmd.prepare_data_set(raw)
