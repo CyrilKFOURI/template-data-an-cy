@@ -13,7 +13,12 @@ PV/LCV rows, reloads raw NOVA data for just the (country, year) pairs those rows
 belong to, recomputes PV/LCV for those exact rows with CLS_VEHICLE_TYPE normalised,
 and writes one new consolidated Parquet file with everything else untouched.
 
-Usage:  python regenerate_view1_pv_lcv.py
+Usage:
+  python regenerate_view1_pv_lcv.py                    # run the fix
+  python regenerate_view1_pv_lcv.py --diagnose          # print the CLS_VEHICLE_TYPE
+                                                          # crosstab for all countries,
+                                                          # before/after mapping
+  python regenerate_view1_pv_lcv.py --diagnose SPAIN ITALY   # just those countries
 """
 
 import os
@@ -93,6 +98,47 @@ def normalize_cls_vehicle_type_series(s: pd.Series) -> pd.Series:
     return mapped.fillna("NOT IDENTIFIED")
 
 
+ALL_COUNTRIES = [
+    "BELGIUM", "FRANCE", "GERMANY", "ITALY",
+    "LUXEMBOURG", "NETHERLANDS", "SPAIN", "UNITED KINGDOM",
+]
+
+
+def diagnose_vehicle_types(countries: list[str] | None = None) -> None:
+    """Standalone sanity check, independent of the KPI-fixing pass: loads raw
+    NOVA data for the given countries (default: all 8), normalises
+    CLS_VEHICLE_TYPE, and prints a COUNTRY x CLS_VEHICLE_TYPE crosstab (% of
+    rows per country) both BEFORE and AFTER the mapping — so you can see at a
+    glance whether every country actually ends up with a sane PV/LCV split."""
+    countries = countries or ALL_COUNTRIES
+    raw = fmd.load_country_monthly_data(
+        folder_path=str(DATA_FOLDER),
+        countries=countries,
+        start_yyyymm=START_YYYYMM,
+        end_yyyymm=END_YYYYMM,
+        cols=fmd.COLUMNS_TO_READ,
+    )
+    if raw.empty:
+        print("No raw NOVA data found for", countries)
+        return
+    nova = fmd.prepare_data_set(raw)
+    if "CLS_VEHICLE_TYPE" not in nova.columns:
+        print("CLS_VEHICLE_TYPE column not present in the loaded data.")
+        return
+
+    print(f"Loaded {len(nova):,} rows across {sorted(nova['COUNTRY'].dropna().unique())}\n")
+
+    before = (pd.crosstab(nova["COUNTRY"], nova["CLS_VEHICLE_TYPE"].astype(str), normalize="index") * 100).round(1)
+    print("CLS_VEHICLE_TYPE distribution by country — BEFORE mapping (%):")
+    print(before.to_string())
+    print()
+
+    nova["CLS_VEHICLE_TYPE"] = normalize_cls_vehicle_type_series(nova["CLS_VEHICLE_TYPE"])
+    after = (pd.crosstab(nova["COUNTRY"], nova["CLS_VEHICLE_TYPE"], normalize="index") * 100).round(1)
+    print("CLS_VEHICLE_TYPE distribution by country — AFTER mapping (%):")
+    print(after.to_string())
+
+
 # ── Load the existing View 1 KPI output ────────────────────────────────────────
 
 def load_existing_view1() -> pd.DataFrame:
@@ -150,7 +196,17 @@ def main():
             print(f"  [{country_code} {year}] no rows for that year — leaving as-is")
             continue
         if "CLS_VEHICLE_TYPE" in prepped.columns:
+            raw_dist = prepped["CLS_VEHICLE_TYPE"].astype(str).value_counts(normalize=True).mul(100).round(1)
+            print(f"  [{country_code} {year}] raw CLS_VEHICLE_TYPE distribution (% of rows):")
+            print(raw_dist.to_string())
+
             prepped["CLS_VEHICLE_TYPE"] = normalize_cls_vehicle_type_series(prepped["CLS_VEHICLE_TYPE"])
+
+            mapped_dist = prepped["CLS_VEHICLE_TYPE"].value_counts(normalize=True).mul(100).round(1)
+            print(f"  [{country_code} {year}] CLS_VEHICLE_TYPE distribution after mapping (% of rows):")
+            print(mapped_dist.to_string())
+        else:
+            print(f"  [{country_code} {year}] WARNING: no CLS_VEHICLE_TYPE column in raw data at all")
 
         rows_to_fix = df[broken_mask & (df["COUNTRY"] == country_code) & (df["YEAR"] == year)]
         for idx, row in rows_to_fix.iterrows():
@@ -174,4 +230,17 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--diagnose", nargs="*", metavar="COUNTRY", default=None,
+        help="Print the CLS_VEHICLE_TYPE crosstab (before/after mapping) for the "
+             "given countries (default: all 8) instead of running the fix.",
+    )
+    args = parser.parse_args()
+
+    if args.diagnose is not None:
+        diagnose_vehicle_types(args.diagnose or None)
+    else:
+        main()
