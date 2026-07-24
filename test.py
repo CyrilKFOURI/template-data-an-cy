@@ -1,4 +1,3 @@
-
 """
 Fixes KPI 6 (PV / LCV split) rows that came out as 0/0 in the precomputed View 1
 output. Root cause: fleet_monitoring_dashboard_key_refactor.kpi_pv_lcv() compares
@@ -78,16 +77,20 @@ CLS_VEHICLE_TYPE_CODE_MAP = {
 }
 
 
-def normalize_cls_vehicle_type(value) -> str:
-    text = str(value).strip()
-    upper = text.upper()
-    if upper in CLS_VEHICLE_TYPE_TEXT_MAP:
-        return CLS_VEHICLE_TYPE_TEXT_MAP[upper]
-    try:
-        code = str(int(float(text)))
-    except (TypeError, ValueError):
-        code = upper
-    return CLS_VEHICLE_TYPE_CODE_MAP.get(code, "NOT IDENTIFIED")
+def normalize_cls_vehicle_type_series(s: pd.Series) -> pd.Series:
+    """Vectorized CLS_VEHICLE_TYPE cleanup, then code/text -> label mapping.
+    Pandas can read a numeric-code column as float64, so a code like 1 shows up
+    as the string "1.0" once stringified — strip that trailing ".0" first, or
+    the code-map lookup below silently misses every numeric-coded row (that was
+    the actual bug: the old per-value int(float(...)) conversion never even ran
+    because the ".0"-suffixed text never matched anything upstream of it)."""
+    cleaned = s.astype(str).str.strip()
+    cleaned = cleaned.str.replace(r"^(\d+)\.0$", r"\1", regex=True)
+    upper = cleaned.str.upper()
+
+    mapped = upper.map(CLS_VEHICLE_TYPE_TEXT_MAP)
+    mapped = mapped.fillna(cleaned.map(CLS_VEHICLE_TYPE_CODE_MAP))
+    return mapped.fillna("NOT IDENTIFIED")
 
 
 # ── Load the existing View 1 KPI output ────────────────────────────────────────
@@ -147,7 +150,7 @@ def main():
             print(f"  [{country_code} {year}] no rows for that year — leaving as-is")
             continue
         if "CLS_VEHICLE_TYPE" in prepped.columns:
-            prepped["CLS_VEHICLE_TYPE"] = prepped["CLS_VEHICLE_TYPE"].map(normalize_cls_vehicle_type)
+            prepped["CLS_VEHICLE_TYPE"] = normalize_cls_vehicle_type_series(prepped["CLS_VEHICLE_TYPE"])
 
         rows_to_fix = df[broken_mask & (df["COUNTRY"] == country_code) & (df["YEAR"] == year)]
         for idx, row in rows_to_fix.iterrows():
