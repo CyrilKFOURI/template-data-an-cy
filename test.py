@@ -1,11 +1,7 @@
-Voici la version sans "hyper" :
 
----
 
-Je suis très satisfait de ce stage, il correspond exactement à ce à quoi je m'attendais. Le fait d'avoir eu des missions assez variées, touchant à différents domaines du Risk, tout en appliquant toujours mes compétences de data science, a été particulièrement enrichissant.
+J'ai beaucoup apprécié les équipes au sein de Risk avec lesquelles j'ai pu échanger. Mon tuteur m'a apporté un accompagnement très complet, au niveau des explications de comment fonctionne le business model d'Arval, comment fonctionnent les différents indicateurs de risque, quel est l'intérêt de ces indicateurs, le côté métier, les enjeux. Mon tuteur était toujours disponible pour répondre à mes questions, a su être patient et pédagogue tout au long du stage. Il m'a donné beaucoup de son temps pour s'assurer que j'avais bien compris tous les aspects. Il m'a notamment fait découvrir en détail les enjeux derrière le risque de crédit, ainsi que les enjeux liés aux risques de concentration sur le portefeuille d'Arval.
 
-En ce qui concerne les équipes, j'ai beaucoup apprécié les équipes Risk avec lesquelles j'ai pu échanger. Mon tuteur m'a apporté un accompagnement très complet, au niveau des explications de comment fonctionne le business model d'Arval, comment fonctionnent les différents indicateurs de risque, quel est l'intérêt de ces indicateurs, le côté métier, les enjeux. Mon tuteur était toujours disponible pour répondre à mes questions, a su être patient et pédagogue tout au long du stage.
+Je suis très satisfait de ce stage, il correspond exactement à ce à quoi je m'attendais. Le fait d'avoir eu des missions assez variées, touchant à différents domaines du Risk (ESG, Asset, Crédit), tout en appliquant toujours mes compétences de data science, a été particulièrement enrichissant.
 
----
-
-Dis-moi si ça te convient.
+Le côté quantitatif derrière les missions, le fait de devoir réfléchir au côté métier tout en explorant les données, de se poser des questions sur la data quality et sur ce que l'on peut conclure de l'analyse des données et des résultats des KPIs, sont les choses que j'ai préférées durant ma période de stage. Cela a renforcé mon désir de me spécialiser dans la data science, dans le domaine financier, où je peux pleinement faire ce que j'aime.
