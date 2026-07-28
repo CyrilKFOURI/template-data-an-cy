@@ -1,75 +1,11 @@
-import pandas as pd
+Voici la version sans "hyper" :
 
-def compute_exposure(
-    df,
-    month,
-    year,
-    asset_status,
-    aggregation="sum",
-    country_col="COUNTRY",
-    cob_col="COB_DATE",
-    status_col="NOVA_ASSET_STATUS",
-    customer_col="ID_CUSTOMER",
-):
-    # Filtre date
-    mask = (
-        (df[cob_col].dt.year == year)
-        & (df[cob_col].dt.month == month)
-    )
+---
 
-    # Filtre statut
-    if str(asset_status).upper() != "ALL":
-        mask &= (df[status_col] == asset_status)
+Je suis très satisfait de ce stage, il correspond exactement à ce à quoi je m'attendais. Le fait d'avoir eu des missions assez variées, touchant à différents domaines du Risk, tout en appliquant toujours mes compétences de data science, a été particulièrement enrichissant.
 
-    d = df.loc[mask].copy()
+En ce qui concerne les équipes, j'ai beaucoup apprécié les équipes Risk avec lesquelles j'ai pu échanger. Mon tuteur m'a apporté un accompagnement très complet, au niveau des explications de comment fonctionne le business model d'Arval, comment fonctionnent les différents indicateurs de risque, quel est l'intérêt de ces indicateurs, le côté métier, les enjeux. Mon tuteur était toujours disponible pour répondre à mes questions, a su être patient et pédagogue tout au long du stage.
 
-    if d.empty:
-        return pd.DataFrame(columns=[country_col, "EXPOSURE_MILLIONS"])
+---
 
-    # Calcul de l'exposition
-    d["EXPOSURE"] = (
-        d["EXPOSURE_AMOUNT_LTR"].fillna(0)
-        + d["PENDING_ORDERS"].fillna(0)
-    )
-
-    # Même logique que ton code d'origine :
-    # dernière ligne par client ET par pays
-    d = (
-        d.sort_values(cob_col)
-         .drop_duplicates(subset=[country_col, customer_col], keep="last")
-    )
-
-    # Group by pays
-    if aggregation == "sum":
-        result = (
-            d.groupby(country_col, as_index=False)["EXPOSURE"]
-             .sum()
-        )
-    else:
-        result = (
-            d.groupby(country_col, as_index=False)["EXPOSURE"]
-             .mean()
-        )
-
-    # Affichage en millions
-    result["EXPOSURE_MILLIONS"] = (
-        result["EXPOSURE"] / 1_000_000
-    ).round(4)
-
-    return result[[country_col, "EXPOSURE_MILLIONS"]]
-
-
-# Calcul
-exposure_df = compute_exposure(
-    df,              # remplace par le nom de ton DataFrame
-    month=12,
-    year=2025,
-    asset_status="ALL",
-    aggregation="sum",
-)
-
-# Export Excel
-exposure_df.to_excel("Exposure_by_Country.xlsx", index=False)
-
-# Affichage
-print(exposure_df)
+Dis-moi si ça te convient.
