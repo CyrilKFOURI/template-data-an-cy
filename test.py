@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import glob
@@ -8,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 from dash import ALL, Dash, Input, Output, State, callback_context, dcc, html, no_update
 
 # =============================================================================
@@ -295,6 +295,10 @@ def _build_vehicle_origination_table(customer_id: str, country: str | None, rati
     veh = d.sort_values("COB_DATE") if "COB_DATE" in d.columns else d
     if keys:
         veh = veh.drop_duplicates(subset=keys, keep="last")
+    # Display order follows the leasing timeline (contract start date), not the
+    # snapshot date used above only to pick each contract's latest known row.
+    if "CONTRACT_START_DATE" in veh.columns:
+        veh = veh.sort_values("CONTRACT_START_DATE")
 
     current_disp = _fmt_rating(rating_col, d.sort_values("COB_DATE")[rating_col].dropna().iloc[-1]) \
         if rating_col in d.columns and d[rating_col].notna().any() else None
@@ -319,6 +323,34 @@ def _build_vehicle_origination_table(customer_id: str, country: str | None, rati
             "STATUS": status,
         })
     return rows
+
+
+# =============================================================================
+# Rating-evolution timeline — every known snapshot for this client, oldest to
+# newest, with the arrears reported at that exact COB_DATE. This is the
+# customer-level history (across all their contracts' snapshots), separate
+# from the per-vehicle "at origination" table above.
+# =============================================================================
+
+def _build_rating_timeline(customer_id: str, country: str | None, rating_col: str) -> list[dict]:
+    d = GLOBAL_DF[GLOBAL_DF["ID_CUSTOMER"].astype(str).str.strip() == customer_id]
+    if country and "COUNTRY" in d.columns:
+        d = d[d["COUNTRY"] == country]
+    if rating_col not in d.columns or "COB_DATE" not in d.columns:
+        return []
+    d = d.dropna(subset=[rating_col, "COB_DATE"]).sort_values("COB_DATE")
+    if d.empty:
+        return []
+    d = d.drop_duplicates(subset=["COB_DATE"], keep="last")
+
+    points = []
+    for _, row in d.iterrows():
+        points.append({
+            "COB_DATE": row["COB_DATE"],
+            "RATING_DISP": _fmt_rating(rating_col, row[rating_col]),
+            "ARREARS": {c: row.get(c) for c in ARRS_COLUMNS_PRESENT},
+        })
+    return points
 
 
 # =============================================================================
@@ -397,6 +429,67 @@ def _table(headers: list[str], rows: list[list], row_ids: list | None = None):
         [html.Tbody(body_rows)],
         style=TABLE_STYLE,
     )
+
+
+# ── Rating-evolution timeline (Plotly line chart) ────────────────────────────
+# One series (this client's own rating over time), y-axis is a rank among the
+# client's own distinct rating values (worst on top) with the real grade text
+# as tick labels, hover shows the exact rating + the arrears reported at that
+# same COB_DATE snapshot.
+
+def _render_rating_timeline(customer_id: str, country: str | None, rating_col: str):
+    points = _build_rating_timeline(customer_id, country, rating_col)
+    if not points:
+        return html.P("No rated snapshots available to build a timeline.",
+                       style={"color": "#a0aec0", "fontSize": "12px"})
+
+    distinct_vals = sorted(
+        {p["RATING_DISP"] for p in points},
+        key=lambda v: _rating_sort_key(rating_col, v),
+    )
+    rank = {v: i for i, v in enumerate(distinct_vals)}
+
+    dates = [p["COB_DATE"] for p in points]
+    ys = [rank[p["RATING_DISP"]] for p in points]
+    texts = [p["RATING_DISP"] for p in points]
+
+    customdata = []
+    for p in points:
+        if ARRS_COLUMNS_PRESENT:
+            lines = "<br>".join(
+                f"{c.replace('ARRS_', '').replace('_', ' ')}: "
+                f"{p['ARREARS'].get(c):,.0f}" if pd.notna(p["ARREARS"].get(c))
+                else f"{c.replace('ARRS_', '').replace('_', ' ')}: —"
+                for c in ARRS_COLUMNS_PRESENT
+            )
+        else:
+            lines = "Arrears not available in this local dataset."
+        customdata.append(lines)
+
+    fig = go.Figure(go.Scatter(
+        x=dates, y=ys, text=texts, customdata=customdata,
+        mode="lines+markers+text",
+        textposition="top center",
+        textfont=dict(size=12, color="#1a1a2e", family="Inter, -apple-system, sans-serif"),
+        line=dict(color="#3182ce", width=2),
+        marker=dict(size=10, color="#3182ce", line=dict(width=2, color="#ffffff")),
+        hovertemplate="<b>%{x|%Y-%m-%d}</b><br>Rating: <b>%{text}</b><br><br>%{customdata}<extra></extra>",
+    ))
+    fig.update_layout(
+        height=240,
+        margin=dict(l=10, r=20, t=20, b=30),
+        plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
+        font=dict(family="Inter, -apple-system, sans-serif", size=12, color="#4a5568"),
+        yaxis=dict(
+            tickmode="array", tickvals=list(range(len(distinct_vals))), ticktext=distinct_vals,
+            gridcolor="#f0f2f5", zeroline=False,
+            range=[-0.5, len(distinct_vals) - 0.5] if len(distinct_vals) > 1 else [-1, 1],
+        ),
+        xaxis=dict(gridcolor="#f0f2f5", zeroline=False),
+        hoverlabel=dict(bgcolor="#1a1a2e", font=dict(color="#ffffff", size=12), bordercolor="#1a1a2e"),
+        showlegend=False,
+    )
+    return dcc.Graph(figure=fig, config={"displayModeBar": False}, style={"marginTop": "10px"})
 
 
 GRID_PAGE_SIZE = 20
@@ -676,6 +769,13 @@ def _toggle_client_modal(card_clicks, _close_clicks, clients, rating_col):
         html.Div([
             _panel_title("Vehicles — Rating at Origination vs. Current Rating"),
             html.Div(veh_block, style={"overflowX": "auto"}),
+        ], style={**CARD_STYLE, "marginBottom": "14px"}),
+
+        html.Div([
+            _panel_title(f"Rating History — {RATING_COL_LABELS.get(rating_col, rating_col)}"),
+            html.Div("Hover a point to see the arrears reported at that snapshot.",
+                     style={"fontSize": "11px", "color": "#a0aec0"}),
+            _render_rating_timeline(str(cust_id), country, rating_col),
         ], style=CARD_STYLE),
     ])
 
