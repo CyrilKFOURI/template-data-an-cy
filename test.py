@@ -1,7 +1,5 @@
-COLUMNS_TO_READ = [
-    "ID_CUSTOMER", "COUNTRY", "COB_DATE", "CONTRACT_START_DATE",
-    "ID_CONTRACT", "VEHICLE_ID", "ID_QUOTATION",
-    "GROUP_RATING", "COUNTERPARTY_RATING", "CLS_GROUP_RATING",
-    "ARRS_BTWN_0_30D", "ARRS_BTWN_31_60D", "ARRS_BTWN_61_90D",
-    "ARRS_BTWN_91_180D", "ARRS_BTWN_181_270D", "ARRS_MORE_270D",
-]
+# vérifie l'hypothèse : MORE_30D devrait ≈ somme des tranches au-dessus de 30j
+check = df["ARRS_MORE_30D"] - (df["ARRS_BTWN_31_60D"] + df["ARRS_BTWN_61_90D"]
+                                + df["ARRS_BTWN_91_180D"] + df["ARRS_BTWN_181_270D"]
+                                + df["ARRS_MORE_270D"])
+print(check.abs().describe())  
