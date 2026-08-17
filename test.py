@@ -1,12 +1,18 @@
 import pandas as pd
 
-error_cols = []
-
 for col in df.columns:
-    try:
-        df[[col]].to_parquet("/tmp/test.parquet", index=False)
-    except Exception as e:
-        if "Expected bytes, got" in str(e):
-            error_cols.append(col)
+    # On essaie de convertir en numérique
+    numeric = pd.to_numeric(df[col], errors="coerce")
 
-print(error_cols)
+    # Si toutes les valeurs non-nulles sont numériques
+    if numeric.notna().sum() == df[col].notna().sum():
+
+        # Si toutes les valeurs numériques sont entières
+        if (numeric.dropna() % 1 == 0).all():
+            df[col] = numeric.astype("Int64")
+        else:
+            df[col] = numeric.astype("float64")
+
+    # Sinon, on garde en texte
+    else:
+        df[col] = df[col].astype("string")
