@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import glob
@@ -514,9 +513,12 @@ def build_comparison() -> pd.DataFrame:
         return pd.DataFrame()
 
     right = CLS_CUSTOMER_STATE.copy()
-    right["_ID"] = right[id_c].astype(str).str.strip()
+    # Case-insensitive on purpose — CLS and NOVA are separate systems and one
+    # exporting "es12345678" while the other has "ES12345678" would otherwise
+    # silently produce zero matches despite being the same customer.
+    right["_ID"] = right[id_c].astype(str).str.strip().str.upper()
     left = NOVA_CUSTOMER_STATE.copy()
-    left["_ID"] = left["ID_CUSTOMER"]
+    left["_ID"] = left["ID_CUSTOMER"].astype(str).str.strip().str.upper()
 
     merged = left.merge(right, on="_ID", how="inner", suffixes=("_NOVA", "_CLS"))
     if merged.empty:
@@ -639,6 +641,36 @@ ADJUSTED_EXPOSURE_DF = build_adjusted_exposure()
 
 
 # =============================================================================
+# CLS adjusted exposure — the CLS-side mirror of ADJUSTED_EXPOSURE_DF, built
+# purely from CLS's own reported fields (Total Exposure + Total Arrears, both
+# already on CLS_CUSTOMER_STATE). No customer-ID matching against NOVA is
+# needed for this — it powers the country-level comparison tab, which stays
+# useful even when the two systems' IDs don't line up.
+# =============================================================================
+
+def build_cls_adjusted() -> pd.DataFrame:
+    if not CLS_AVAILABLE:
+        return pd.DataFrame()
+    country_c = CLS_COL.get("Code Country")
+    rating_c = CLS_COL.get("Obligor Rating (CLS)")
+    exp_c = CLS_COL.get("Total Exposure (incl. Pending Ord) (LTR)")
+    arr_c = CLS_COL.get("Total Arrears")
+    if not exp_c:
+        return pd.DataFrame()
+
+    d = CLS_CUSTOMER_STATE.copy()
+    d["COUNTRY"] = d[country_c] if country_c else None
+    d["RATING_DISP"] = d[rating_c].apply(lambda v: _fmt_rating("CLS_GROUP_RATING", v)) if rating_c else None
+    d["RAW_EXPOSURE"] = d[exp_c]
+    d["ARREARS_USED"] = d[arr_c].fillna(0) if arr_c else 0.0
+    d["ADJUSTED_EXPOSURE"] = d["RAW_EXPOSURE"].fillna(0) + d["ARREARS_USED"]
+    return d
+
+
+CLS_ADJUSTED_DF = build_cls_adjusted()
+
+
+# =============================================================================
 # Dash app
 # =============================================================================
 
@@ -648,6 +680,7 @@ app.title = "Credit Risk Control Center"
 PAGE_STYLE = {"fontFamily": "Inter, -apple-system, sans-serif", "minHeight": "100vh", "background": "#f7fafc"}
 CARD_STYLE = {"background": "#ffffff", "borderRadius": "10px", "border": "1px solid #e2e8f0", "padding": "18px"}
 PANEL_TITLE_STYLE = {"fontWeight": "700", "fontSize": "14px", "color": "#1a1a2e", "marginBottom": "12px"}
+FIELD_TITLE_STYLE = {"fontSize": "11px", "color": "#718096", "fontWeight": "600", "marginBottom": "4px"}
 TABLE_STYLE = {"width": "100%", "borderCollapse": "collapse", "fontSize": "12.5px"}
 TH_STYLE = {"textAlign": "left", "padding": "8px 10px", "borderBottom": "2px solid #e2e8f0",
             "color": "#718096", "fontSize": "11px", "fontWeight": "700", "textTransform": "uppercase"}
@@ -784,25 +817,41 @@ def render_comparison():
     if not CLS_AVAILABLE:
         return _missing_cls_banner()
     if COMPARISON_DF.empty:
-        return html.P("No matching customers found between NOVA and CLS.", style={"color": "#a0aec0"})
+        # Zero matches almost always means the ID formats differ between the
+        # two systems (padding, prefix, case) rather than genuinely no
+        # overlap — show real samples from both sides so that's diagnosable
+        # here instead of a dead end.
+        nova_ids = sorted(NOVA_CUSTOMER_STATE["ID_CUSTOMER"].dropna().astype(str).unique())[:8]
+        id_c = CLS_COL.get("Id Customer")
+        cls_ids = sorted(CLS_CUSTOMER_STATE[id_c].dropna().astype(str).unique())[:8] if id_c else []
+        return html.Div([
+            html.P("No matching customers found between NOVA and CLS — the ID formats likely differ "
+                   "between the two systems. Compare the samples below.",
+                   style={"color": "#c53030", "fontWeight": "600", "marginBottom": "12px"}),
+            html.Div([
+                html.Div([_panel_title(f"NOVA ID_CUSTOMER samples ({NOVA_CUSTOMER_STATE['ID_CUSTOMER'].nunique():,} distinct)"),
+                          html.Ul([html.Li(i, style={"fontFamily": "monospace", "fontSize": "12px"}) for i in nova_ids])],
+                         style={**CARD_STYLE, "flex": "1"}),
+                html.Div([_panel_title(f"CLS Id Customer samples ({CLS_CUSTOMER_STATE[id_c].nunique():,} distinct)" if id_c else "CLS Id Customer"),
+                          html.Ul([html.Li(i, style={"fontFamily": "monospace", "fontSize": "12px"}) for i in cls_ids])
+                          if cls_ids else html.P("No 'Id Customer' column resolved on the CLS side.", style={"color": "#a0aec0"})],
+                         style={**CARD_STYLE, "flex": "1"}),
+            ], style={"display": "flex", "gap": "16px"}),
+        ])
 
     n = len(COMPARISON_DF)
-    # .mean() over an all-NaN column (e.g. NOVA has no arrears data at all
-    # locally) returns float NaN, not None — `is not None` doesn't catch that,
-    # so the display check below must be pd.notna(), not an identity check.
     rating_match_pct = 100 * COMPARISON_DF["RATING_MATCH"].mean() if "RATING_MATCH" in COMPARISON_DF else None
     exp_mae = COMPARISON_DF["EXPOSURE_DIFF"].abs().mean() if "EXPOSURE_DIFF" in COMPARISON_DF else None
     arr_mae = COMPARISON_DF["ARREARS_DIFF"].abs().mean() if "ARREARS_DIFF" in COMPARISON_DF else None
 
     tiles = [
         _stat_tile("Matched customers", f"{n:,}"),
-        _stat_tile("Rating match rate", f"{rating_match_pct:.1f}%" if pd.notna(rating_match_pct) else "—",
+        _stat_tile("Rating match rate", f"{rating_match_pct:.1f}%" if rating_match_pct is not None else "—",
                     "NOVA CLS_GROUP_RATING vs. CLS Obligor Rating"),
-        _stat_tile("Exposure — mean abs diff", f"€{exp_mae:,.0f}" if pd.notna(exp_mae) else "—",
+        _stat_tile("Exposure — mean abs diff", f"€{exp_mae:,.0f}" if exp_mae is not None else "—",
                     "NOVA computed vs. CLS Total Exposure"),
-        _stat_tile("Arrears — mean abs diff", f"€{arr_mae:,.0f}" if pd.notna(arr_mae) else "—",
-                    "NOVA computed vs. CLS Total Arrears" if ARRS_COLUMNS_PRESENT else
-                    "NOVA has no arrears data locally to compare"),
+        _stat_tile("Arrears — mean abs diff", f"€{arr_mae:,.0f}" if arr_mae is not None else "—",
+                    "NOVA computed vs. CLS Total Arrears"),
     ]
 
     fig = None
@@ -1114,6 +1163,134 @@ def render_adjusted_exposure():
     ])
 
 
+# =============================================================================
+# Country comparison — NOVA vs. CLS side by side, independently aggregated
+# and filtered (country, rating band). Unlike the "NOVA ↔ CLS Comparison" tab
+# this never needs customer-level ID matching between the two systems, so it
+# stays useful even when that join finds nothing.
+# =============================================================================
+
+def _country_options() -> list[str]:
+    countries = set()
+    if not NOVA_CUSTOMER_STATE.empty and "COUNTRY" in NOVA_CUSTOMER_STATE.columns:
+        countries |= set(NOVA_CUSTOMER_STATE["COUNTRY"].dropna().unique())
+    if not CLS_ADJUSTED_DF.empty and "COUNTRY" in CLS_ADJUSTED_DF.columns:
+        countries |= set(CLS_ADJUSTED_DF["COUNTRY"].dropna().unique())
+    return sorted(countries)
+
+
+def _rating_band_options() -> list[str]:
+    vals = set()
+    if not ADJUSTED_EXPOSURE_DF.empty and "CLS_GROUP_RATING_DISP" in ADJUSTED_EXPOSURE_DF.columns:
+        vals |= set(ADJUSTED_EXPOSURE_DF["CLS_GROUP_RATING_DISP"].dropna().unique())
+    if not CLS_ADJUSTED_DF.empty and "RATING_DISP" in CLS_ADJUSTED_DF.columns:
+        vals |= set(CLS_ADJUSTED_DF["RATING_DISP"].dropna().unique())
+    return sorted(vals, key=_rating_sort_key_local)
+
+
+def render_country_comparison():
+    if not CLS_AVAILABLE:
+        return _missing_cls_banner()
+    return html.Div([
+        html.Div([
+            html.Div([
+                html.Div("Country", style=FIELD_TITLE_STYLE),
+                dcc.Dropdown(id="cc-filter-country",
+                             options=[{"label": c, "value": c} for c in _country_options()],
+                             multi=True, placeholder="All countries", style={"minWidth": "220px"}),
+            ], style={"flex": "1"}),
+            html.Div([
+                html.Div("CLS Rating band", style=FIELD_TITLE_STYLE),
+                dcc.Dropdown(id="cc-filter-rating",
+                             options=[{"label": v, "value": v} for v in _rating_band_options()],
+                             multi=True, placeholder="All rating bands", style={"minWidth": "220px"}),
+            ], style={"flex": "1"}),
+        ], style={"display": "flex", "gap": "14px", "marginBottom": "8px"}),
+        html.Div("Each side's totals are computed independently on its own dataset, then filtered the same "
+                 "way — no customer-level ID matching required (unlike the NOVA ↔ CLS Comparison tab), so "
+                 "this stays useful even if that join finds nothing.",
+                 style={"fontSize": "11px", "color": "#a0aec0", "marginBottom": "16px"}),
+        html.Div(id="cc-content"),
+    ])
+
+
+def _country_comparison_bar(nova_by_country: pd.Series, cls_by_country: pd.Series, y_title: str):
+    countries = sorted(set(nova_by_country.index) | set(cls_by_country.index))
+    fig = go.Figure([
+        go.Bar(name="NOVA", x=countries, y=[nova_by_country.get(c, 0) for c in countries], marker_color="#3182ce"),
+        go.Bar(name="CLS", x=countries, y=[cls_by_country.get(c, 0) for c in countries], marker_color="#a0aec0"),
+    ])
+    fig.update_layout(
+        height=320, margin=dict(l=50, r=20, t=20, b=40), barmode="group",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
+        font=dict(family="Inter, -apple-system, sans-serif", size=12, color="#4a5568"),
+        xaxis=dict(title="Country", gridcolor="#f0f2f5"),
+        yaxis=dict(title=y_title, gridcolor="#f0f2f5"),
+    )
+    return fig
+
+
+def build_country_comparison_content(countries: list[str] | None, ratings: list[str] | None):
+    if not CLS_AVAILABLE:
+        return _missing_cls_banner()
+
+    nova_d = ADJUSTED_EXPOSURE_DF
+    cls_d = CLS_ADJUSTED_DF
+    if countries:
+        nova_d = nova_d[nova_d["COUNTRY"].isin(countries)]
+        cls_d = cls_d[cls_d["COUNTRY"].isin(countries)]
+    if ratings:
+        nova_d = nova_d[nova_d["CLS_GROUP_RATING_DISP"].isin(ratings)]
+        cls_d = cls_d[cls_d["RATING_DISP"].isin(ratings)]
+
+    nova_raw, cls_raw = nova_d["TOTAL_EXPOSURE"].sum(), cls_d["RAW_EXPOSURE"].sum()
+    nova_adj, cls_adj = nova_d["ADJUSTED_EXPOSURE"].sum(), cls_d["ADJUSTED_EXPOSURE"].sum()
+    raw_diff_pct = 100 * (nova_raw - cls_raw) / cls_raw if cls_raw else None
+    adj_diff_pct = 100 * (nova_adj - cls_adj) / cls_adj if cls_adj else None
+
+    tiles = [
+        _stat_tile("NOVA raw exposure", f"€{nova_raw / 1_000_000:,.2f}M"),
+        _stat_tile("CLS raw exposure", f"€{cls_raw / 1_000_000:,.2f}M",
+                    f"NOVA is {raw_diff_pct:+.1f}% vs CLS" if raw_diff_pct is not None else None),
+        _stat_tile("NOVA adjusted exposure", f"€{nova_adj / 1_000_000:,.2f}M", "raw + arrears", accent="#d98943"),
+        _stat_tile("CLS adjusted exposure", f"€{cls_adj / 1_000_000:,.2f}M",
+                    f"NOVA is {adj_diff_pct:+.1f}% vs CLS" if adj_diff_pct is not None else None, accent="#d98943"),
+    ]
+
+    nova_raw_by_country = nova_d.groupby("COUNTRY")["TOTAL_EXPOSURE"].sum()
+    cls_raw_by_country = cls_d.groupby("COUNTRY")["RAW_EXPOSURE"].sum()
+    nova_adj_by_country = nova_d.groupby("COUNTRY")["ADJUSTED_EXPOSURE"].sum()
+    cls_adj_by_country = cls_d.groupby("COUNTRY")["ADJUSTED_EXPOSURE"].sum()
+
+    raw_fig = _country_comparison_bar(nova_raw_by_country, cls_raw_by_country, "Raw exposure (€)")
+    adj_fig = _country_comparison_bar(nova_adj_by_country, cls_adj_by_country, "Adjusted exposure (€)")
+
+    all_countries = sorted(set(nova_raw_by_country.index) | set(cls_raw_by_country.index))
+    rows = []
+    for c in all_countries:
+        nr, cr = nova_raw_by_country.get(c, 0), cls_raw_by_country.get(c, 0)
+        na, ca = nova_adj_by_country.get(c, 0), cls_adj_by_country.get(c, 0)
+        rows.append([
+            c, f"€{nr:,.0f}", f"€{cr:,.0f}", f"€{nr - cr:,.0f}",
+            f"€{na:,.0f}", f"€{ca:,.0f}", f"€{na - ca:,.0f}",
+        ])
+    table = _table(["Country", "NOVA raw", "CLS raw", "Raw diff",
+                     "NOVA adjusted", "CLS adjusted", "Adjusted diff"], rows) if rows else \
+        html.P("No data for this filter combination.", style={"color": "#a0aec0"})
+
+    return html.Div([
+        html.Div(tiles, style={"display": "grid", "gridTemplateColumns": "repeat(4, 1fr)", "gap": "14px", "marginBottom": "16px"}),
+        html.Div([_panel_title("Raw exposure by country — NOVA vs. CLS"),
+                  dcc.Graph(figure=raw_fig, config={"displayModeBar": False})],
+                 style={**CARD_STYLE, "marginBottom": "16px"}),
+        html.Div([_panel_title("Adjusted exposure by country — NOVA vs. CLS"),
+                  dcc.Graph(figure=adj_fig, config={"displayModeBar": False})],
+                 style={**CARD_STYLE, "marginBottom": "16px"}),
+        html.Div([_panel_title("Country breakdown"), table], style=CARD_STYLE),
+    ])
+
+
 def _rating_sort_key_local(disp: str):
     if disp == "NR":
         return (-1, 0)
@@ -1135,6 +1312,7 @@ TABS = [
     ("overview", "Overview", render_overview),
     ("quality", "Data Quality", render_data_quality),
     ("comparison", "NOVA ↔ CLS Comparison", render_comparison),
+    ("country", "Country Comparison", render_country_comparison),
     ("adjusted", "Adjusted Exposure", render_adjusted_exposure),
     ("exposure", "Exposure Risk", render_exposure_risk),
     ("onset", "Arrears Onset", render_arrears_onset),
@@ -1185,6 +1363,15 @@ def _render_tab(tab_value):
         if key == tab_value:
             return renderer()
     return html.P("Unknown tab.")
+
+
+@app.callback(
+    Output("cc-content", "children"),
+    Input("cc-filter-country", "value"),
+    Input("cc-filter-rating", "value"),
+)
+def _update_country_comparison(countries, ratings):
+    return build_country_comparison_content(countries, ratings)
 
 
 @app.callback(
