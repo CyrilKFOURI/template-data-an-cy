@@ -7,101 +7,70 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
-from dash import ALL, Dash, Input, Output, callback_context, dcc, html, no_update
+from dash import ALL, Dash, Input, Output, State, callback_context, dcc, html, no_update
 
 # =============================================================================
-# Config — adjust to your environmenta
+# Config — adjust to your environment
 # =============================================================================
 
 BASE_DIR = Path(__file__).resolve().parent
-DATA_FOLDER = BASE_DIR / "data"                                          # NOVA data
-CREDIT_VERIFICATION_DATA_PATH = BASE_DIR / "credit_verification_data.parquet"  # CLS/obligor extract
-
-# If CREDIT_VERIFICATION_DATA_PATH doesn't exist, every section that depends
-# on it degrades gracefully and says so, exactly like models.parquet
-# elsewhere in this project — nothing crashes, NOVA-only checks still run.
+DATA_FOLDER = BASE_DIR / "data"
+MODELS_PATH = BASE_DIR / "models.parquet"
+LOGO_PATH   = BASE_DIR / "a.jpg"
 
 COUNTRIES_TO_READ: list[str] = ["SPAIN"]
-START_YYYYMM = "202001"
+START_YYYYMM = "202301"
 END_YYYYMM   = "202512"
 
-UNIQUE_KEY_COLS = ["ID_CONTRACT", "VEHICLE_ID", "ID_QUOTATION"]
-
-NOVA_COLUMNS = [
+# Fields that already exist in the real NOVA export used by this project.
+REAL_COLUMNS = [
     "COB_DATE", "ID_CONTRACT", "VEHICLE_ID", "ID_QUOTATION",
-    "COUNTRY", "NOVA_ASSET_STATUS", "CONTRACT_START_DATE",
-    "ID_CUSTOMER", "GROUP_RATING", "COUNTERPARTY_RATING", "CLS_GROUP_RATING",
+    "COUNTRY", "NOVA_ASSET_STATUS", "BIKE_OR_CAR",
+    "CLASS_CATALOG", "BRAND_UPDATE", "VEHICLE_CLASS", "VEHICLE_MODEL", "MODEL_CATALOG",
+    "CLS_VEHICLE_TYPE", "OEM_UPDATE", "POWER_CATEGORY", "FUEL_TYPE", "FUEL_TYPE2",
+    "VA_CO2_EMSS_REAL", "FINAL_CONTRACT_DURATION", "VEHICLE_PRICE_EUR",
+    "CONTRACT_START_DATE", "CONTRACT_END_DATE", "CONTRACT_END_DATE_AMENDED", "CONTRACT_FINAL_END",
+    "DATE_OF_ORDER", "DATE_OF_QUOTATION", "REGISTRATION_DATE", "DELIVERY_DATE", "EXTENSION_DATE",
+    "OBLIGOR_IDENTIFIER", "ID_CUSTOMER", "GROUP_RATING", "COUNTERPARTY_RATING", "CLS_GROUP_RATING",
     "ARVAL_INDUSTRY_CODE_CLS_DESCRIPTION", "SHARED_CLIENT_FLAG",
     "EXPOSURE_AMOUNT_LTR", "EXPOSURE_AMOUNT_MTR", "PENDING_ORDERS",
 ]
-WANTED_ARRS_COLUMNS = [
-    "ARRS_BTWN_0_30D", "ARRS_BTWN_31_60D", "ARRS_BTWN_61_90D",
-    "ARRS_BTWN_91_180D", "ARRS_BTWN_181_270D",
-    "ARRS_MORE_30D", "ARRS_MORE_60D", "ARRS_MORE_90D", "ARRS_MORE_180D", "ARRS_MORE_270D",
+
+# Fields requested for the vehicle detail modal that do NOT exist in this local
+# NOVA export yet. They are read conditionally (only if actually present in the
+# parquet schema) so this file runs unmodified against a fuller NOVA export
+# elsewhere — nothing here needs to change once those columns exist.
+WANTED_VEHICLE_DETAIL_COLUMNS = [
+    "VEHICLE_SEGMENT_PROXY", "NORMALISED_VEHICLE_TYPE", "VEHICLE_BODY_TYPE",
+    "NUMBER_OF_DOORS", "NUMBER_OF_CYLENDER", "NUMBER_OF_SEATS", "FISCAL_POWER", "NUMBER_OF_SPEED",
+    "BODY_COLOR", "FUEL_CONSUMPTION_THEORETICAL", "FUEL_CONSUMPTION_UNIT",
+    "FUEL_CONSUMPTION_HIGHWAY", "FUEL_CONSUMPTION_URBAN", "ENGINE_SIZE", "ENGINE_SIZE_UNIT",
+    "GEARBOX", "CATALOG_PRICE", "ENGINE_POWER_HP", "AUTONOMY",
 ]
 
-RATING_COLUMNS = [
-    {"col": "GROUP_RATING", "label": "Group Rating", "numeric": False},
-    {"col": "COUNTERPARTY_RATING", "label": "Counterparty Rating", "numeric": False},
-    {"col": "CLS_GROUP_RATING", "label": "CLS Rating", "numeric": True},
-]
-RATING_COL_NUMERIC = {r["col"]: r["numeric"] for r in RATING_COLUMNS}
+# Customer-level fields requested that do NOT exist in this local NOVA export
+# yet either — same conditional-read pattern, so this works unmodified once
+# CUSTOMER_NAME exists in the fuller export.
+WANTED_CUSTOMER_DETAIL_COLUMNS = ["CUSTOMER_NAME"]
 
-ARRS_BTWN_BUCKETS = [
-    ("ARRS_BTWN_0_30D", "0-30 days"),
-    ("ARRS_BTWN_31_60D", "31-60 days"),
-    ("ARRS_BTWN_61_90D", "61-90 days"),
-    ("ARRS_BTWN_91_180D", "91-180 days"),
-    ("ARRS_BTWN_181_270D", "181-270 days"),
+UNIQUE_KEY_COLS = ["ID_CONTRACT", "VEHICLE_ID", "ID_QUOTATION"]
+
+_MODELS_ENRICH_COLS = [
+    "BRAND_UPDATE", "MODEL",
+    "MARKET_MODEL", "MARKET_BODY_GROUP",
+    "CDN_CLF_SEGMENT", "CDN_CLF_BODY_TYPE",
 ]
 
-# The full column list of the CLS obligor extract, as given — matched
-# case/whitespace-insensitively against whatever the real file actually has,
-# so trailing spaces or minor casing differences in a real export don't
-# silently break every lookup below.
-CLS_EXPECTED_COLUMNS = [
-    "Period Begin", "Period End", "Physical Person Flag", "Code Source System", "Code Country",
-    "Partner (CLS)", "Sales Channel (CLS)", "Local Management Entity", "Flag Managing Entity",
-    "Id Customer", "Id Client Number", "Obligor National ID", "National ID Type", "Main NAC",
-    "Risk Profile", "Country Of Business (CLS)", "Country Of Incorporation (CLS)",
-    "Segmentation Code", "Segmentation Description", "Segmentation Normalized Code",
-    "Type Of Client (RMPM)", "BNPP Industry Code", "BNP Industry Code",
-    "BNPP Industry Sector Description (CLS)", "Legal Status (CLS)", "Currency ISO (CLS)",
-    "Currency System", "Limit Value Amount (LTR)", "Limit Value Expiration Date",
-    "Limit Value Amount (MTR)", "Limit Available", "Exposure Amount (LTR)", "Exposure Date (LTR)",
-    "Exposure Amount (MTR)", "Exposure Date (MTR)", "Pending Orders Amount",
-    "Total Exposure (incl. Pending Ord) (LTR)", "Obligor Rating (CLS)", "Obligor Rating Date (CLS)",
-    "Credit Watch Indicator (CLS)", "Credit Watch Indicator Date (CLS)", "Arval Fleet Size",
-    "Event Of Default", "Date Event Of Default", "Real Payment Term", "Litigation Status",
-    "Litigation Status Code", "Legal Situation Date", "Total Arrears",
-    "Arrears Between 0 And 30 Days", "Arrears Between 31 And 60 Days",
-    "Arrears Between 61 And 90 Days", "Arrears Between 91 And 180 Days",
-    "Arrears Between 181 And 270 Days", "Arrears Above 30 Days", "Arrears Above 60 Days",
-    "Arrears Above 90 Days", "Arrears Above 180 Days", "Arrears Above 270 Days",
-]
-CLS_ARREARS_BTWN = [
-    "Arrears Between 0 And 30 Days", "Arrears Between 31 And 60 Days",
-    "Arrears Between 61 And 90 Days", "Arrears Between 91 And 180 Days",
-    "Arrears Between 181 And 270 Days",
-]
-CLS_DATE_COLUMNS = [
-    "Period Begin", "Period End", "Limit Value Expiration Date", "Exposure Date (LTR)",
-    "Exposure Date (MTR)", "Obligor Rating Date (CLS)", "Credit Watch Indicator Date (CLS)",
-    "Date Event Of Default", "Legal Situation Date",
-]
-CLS_AMOUNT_COLUMNS = [
-    "Limit Value Amount (LTR)", "Limit Value Amount (MTR)", "Limit Available",
-    "Exposure Amount (LTR)", "Exposure Amount (MTR)", "Pending Orders Amount",
-    "Total Exposure (incl. Pending Ord) (LTR)", "Total Arrears",
-] + CLS_ARREARS_BTWN + ["Arrears Above 30 Days", "Arrears Above 60 Days", "Arrears Above 90 Days",
-                         "Arrears Above 180 Days", "Arrears Above 270 Days"]
 
 # =============================================================================
-# NOVA loading — same filename convention as the other dashboards in this repo
+# Data loading — same filename convention as the other dashboards in this repo
+# Filename pattern:  <prefix>-<COUNTRY>-<YYYYMM>.parquet
 # =============================================================================
 
 def _detect_available_columns(folder_path: Path, wanted_cols: list[str]) -> list[str]:
+    """Only keep columns that actually exist in the parquet schema, so reading
+    never fails locally and this file works unmodified once the fuller NOVA
+    export (with the vehicle-spec columns) is available."""
     files = glob.glob(f"{folder_path}/*.parquet")
     if not files:
         return list(wanted_cols)
@@ -113,14 +82,22 @@ def _detect_available_columns(folder_path: Path, wanted_cols: list[str]) -> list
     return [c for c in wanted_cols if c in schema_cols]
 
 
-def load_country_monthly_data(folder_path, countries, start_yyyymm, end_yyyymm, cols=None) -> pd.DataFrame:
+def load_country_monthly_data(
+    folder_path: Path | str,
+    countries: list[str],
+    start_yyyymm: str,
+    end_yyyymm: str,
+    cols: list[str] | None = None,
+) -> pd.DataFrame:
     files = glob.glob(f"{folder_path}/*.parquet")
     dfs: list[pd.DataFrame] = []
-    start_int, end_int = int(start_yyyymm), int(end_yyyymm)
+
+    start_int = int(start_yyyymm)
+    end_int   = int(end_yyyymm)
     countries_upper = {c.strip().upper() for c in countries}
 
     for fp in files:
-        name = os.path.basename(fp).replace(".parquet", "")
+        name  = os.path.basename(fp).replace(".parquet", "")
         parts = [p.strip() for p in name.split("-")]
         if len(parts) < 3:
             continue
@@ -130,105 +107,155 @@ def load_country_monthly_data(folder_path, countries, start_yyyymm, end_yyyymm, 
         except ValueError:
             continue
         if file_country in countries_upper and start_int <= file_yyyymm <= end_int:
-            dfs.append(pd.read_parquet(fp, columns=cols))
+            chunk = pd.read_parquet(fp, columns=cols)
+            dfs.append(chunk)
 
     if not dfs:
-        return pd.DataFrame(columns=cols or NOVA_COLUMNS)
+        return pd.DataFrame(columns=cols or REAL_COLUMNS)
     return pd.concat(dfs, ignore_index=True)
 
 
-def prepare_nova(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df
-    for c in ("COB_DATE", "CONTRACT_START_DATE"):
-        if c in df.columns:
-            df[c] = pd.to_datetime(df[c], errors="coerce")
-    for c in ("COUNTRY",):
-        if c in df.columns:
-            df[c] = df[c].astype(str).str.strip()
-    return df
-
-
-_wanted_nova_cols = NOVA_COLUMNS + WANTED_ARRS_COLUMNS
-_nova_cols_to_read = _detect_available_columns(DATA_FOLDER, _wanted_nova_cols)
-ARRS_COLUMNS_PRESENT = [c for c in WANTED_ARRS_COLUMNS if c in _nova_cols_to_read]
-
-NOVA_DF = load_country_monthly_data(DATA_FOLDER, COUNTRIES_TO_READ, START_YYYYMM, END_YYYYMM,
-                                     cols=_nova_cols_to_read)
-NOVA_DF = prepare_nova(NOVA_DF)
-
-
 # =============================================================================
-# CLS loading — optional second dataset (obligor-level risk extract)
+# Models enrichment (Market Model / Market Body Type) — same join as Use Case 1
 # =============================================================================
 
-def _load_cls_data() -> pd.DataFrame:
-    if not os.path.exists(CREDIT_VERIFICATION_DATA_PATH):
+def _load_models_df() -> pd.DataFrame:
+    path = str(MODELS_PATH)
+    if not os.path.exists(path):
         return pd.DataFrame()
     try:
-        return pd.read_parquet(CREDIT_VERIFICATION_DATA_PATH)
+        import pyarrow.parquet as pq
+        schema_cols = pq.read_schema(path).names
+        cols_to_read = [c for c in _MODELS_ENRICH_COLS if c in schema_cols]
+        mdf = pd.read_parquet(path, columns=cols_to_read)
+        mdf["MODEL"]        = mdf["MODEL"].astype(str).str.strip()
+        mdf["BRAND_UPDATE"] = mdf["BRAND_UPDATE"].astype(str).str.strip()
+        return mdf.drop_duplicates(subset=["BRAND_UPDATE", "MODEL"])
     except Exception:
         return pd.DataFrame()
 
 
-def _resolve_columns(df: pd.DataFrame, expected: list[str]) -> dict:
-    """Maps each expected CLS column label to the actual column name found in
-    df, case/whitespace-insensitively — so a real export's trailing spaces or
-    casing quirks don't silently break every lookup that follows."""
-    norm = {str(c).strip().lower(): c for c in df.columns}
-    return {label: norm.get(label.strip().lower()) for label in expected}
+MODELS_DF = _load_models_df()
 
 
-def prepare_cls(df: pd.DataFrame, col: dict) -> pd.DataFrame:
+def enrich_with_models(df: pd.DataFrame) -> pd.DataFrame:
+    """Extracts MODEL from CLASS_CATALOG (split on '/'), then left-joins
+    models.parquet to add MARKET_MODEL / MARKET_BODY_GROUP — identical logic to
+    use_case_1_heatmap_dashboard_4.enrich_with_models, reused here per the
+    user's request to source Market Model the same way."""
+    enrich_cols = ["MARKET_MODEL", "MARKET_BODY_GROUP", "CDN_CLF_SEGMENT", "CDN_CLF_BODY_TYPE"]
+
+    if "CLASS_CATALOG" not in df.columns or "BRAND_UPDATE" not in df.columns:
+        return df
+
+    out = df.copy()
+    out["MODEL"]        = out["CLASS_CATALOG"].astype(str).str.split("/").str[0].str.strip()
+    out["BRAND_UPDATE"] = out["BRAND_UPDATE"].astype(str).str.strip()
+
+    if MODELS_DF.empty:
+        for c in enrich_cols:
+            if c not in out.columns:
+                out[c] = np.nan
+        return out
+
+    out = out.drop(columns=[c for c in enrich_cols if c in out.columns], errors="ignore")
+    merge_cols = [c for c in _MODELS_ENRICH_COLS if c in MODELS_DF.columns]
+    out = out.merge(MODELS_DF[merge_cols], how="left", on=["BRAND_UPDATE", "MODEL"])
+    return out
+
+
+# =============================================================================
+# Data preparation
+# =============================================================================
+
+DATE_FIELDS = {
+    "COB_DATE", "CONTRACT_START_DATE", "CONTRACT_END_DATE", "CONTRACT_END_DATE_AMENDED",
+    "CONTRACT_FINAL_END", "DATE_OF_ORDER", "DATE_OF_QUOTATION", "REGISTRATION_DATE",
+    "DELIVERY_DATE", "EXTENSION_DATE",
+}
+
+
+def prepare_dataset(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
-    d = df.copy()
-    for label in CLS_DATE_COLUMNS:
-        c = col.get(label)
-        if c and c in d.columns:
-            d[c] = pd.to_datetime(d[c], errors="coerce")
-    for label in CLS_AMOUNT_COLUMNS:
-        c = col.get(label)
-        if c and c in d.columns:
-            d[c] = pd.to_numeric(d[c], errors="coerce")
-    c = col.get("Code Country")
-    if c and c in d.columns:
-        d[c] = d[c].astype(str).str.strip()
-    c = col.get("Id Customer")
-    if c and c in d.columns:
-        d[c] = d[c].astype(str).str.strip()
+    date_cols = [c for c in DATE_FIELDS if c in df.columns]
+    for c in date_cols:
+        df[c] = pd.to_datetime(df[c], errors="coerce")
+    for col in ["COUNTRY", "NOVA_ASSET_STATUS", "BIKE_OR_CAR", "BRAND_UPDATE"]:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.strip()
+    return df
+
+
+def prepare_cv(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    d = df[df["BIKE_OR_CAR"] == "CAR"].copy() if "BIKE_OR_CAR" in df.columns else df.copy()
+    d = enrich_with_models(d)
     return d
 
 
-def _as_bool_flag(series: pd.Series) -> pd.Series:
-    """Normalizes a Y/N, 1/0, True/False-style flag column (real-world export
-    encoding is unknown ahead of time) into a clean nullable boolean."""
-    if series is None:
-        return series
-    mapped = series.astype(str).str.strip().str.upper().map({
-        "Y": True, "YES": True, "TRUE": True, "1": True, "1.0": True,
-        "N": False, "NO": False, "FALSE": False, "0": False, "0.0": False,
-    })
-    return mapped
+# =============================================================================
+# Startup: load + prepare
+# =============================================================================
+
+_wanted_columns = REAL_COLUMNS + WANTED_VEHICLE_DETAIL_COLUMNS + WANTED_CUSTOMER_DETAIL_COLUMNS
+_columns_to_read = _detect_available_columns(DATA_FOLDER, _wanted_columns)
+
+_raw = load_country_monthly_data(
+    DATA_FOLDER, COUNTRIES_TO_READ, START_YYYYMM, END_YYYYMM,
+    cols=_columns_to_read,
+)
+_raw = prepare_dataset(_raw)
+CV_DF = prepare_cv(_raw)
 
 
-CLS_RAW = _load_cls_data()
-CLS_COL = _resolve_columns(CLS_RAW, CLS_EXPECTED_COLUMNS) if not CLS_RAW.empty else {}
-CLS_DF = prepare_cls(CLS_RAW, CLS_COL)
-CLS_AVAILABLE = not CLS_DF.empty
-CLS_MISSING_MSG = (
-    f"Credit verification data not found at {os.path.basename(CREDIT_VERIFICATION_DATA_PATH)}. "
-    "Drop your export there (next to this script) to enable data-quality checks, "
-    "cross-dataset comparison, and arrears-onset analysis on it. "
-    "NOVA-only sections below still work."
+def _build_customer_index(df: pd.DataFrame) -> pd.DataFrame:
+    """One row per known customer (id -> latest known country/name), used to
+    power the searchable Customer ID list and the Country filter next to it."""
+    if df.empty or "ID_CUSTOMER" not in df.columns:
+        return pd.DataFrame(columns=["ID_CUSTOMER", "COUNTRY", "CUSTOMER_NAME"])
+    cols = [c for c in ["ID_CUSTOMER", "COUNTRY", "CUSTOMER_NAME", "COB_DATE"] if c in df.columns]
+    d = df[cols].dropna(subset=["ID_CUSTOMER"]).copy()
+    d["ID_CUSTOMER"] = d["ID_CUSTOMER"].astype(str).str.strip()
+    if "COB_DATE" in d.columns:
+        d = d.sort_values("COB_DATE")
+    fill_cols = [c for c in ["COUNTRY", "CUSTOMER_NAME"] if c in d.columns]
+    if fill_cols:
+        d[fill_cols] = d.groupby("ID_CUSTOMER")[fill_cols].ffill()
+    d = d.drop_duplicates(subset=["ID_CUSTOMER"], keep="last")
+    return d[[c for c in ["ID_CUSTOMER", "COUNTRY", "CUSTOMER_NAME"] if c in d.columns]].sort_values("ID_CUSTOMER")
+
+
+CUSTOMER_INDEX_DF = _build_customer_index(CV_DF)
+COUNTRY_FILTER_OPTIONS = (
+    [{"label": c, "value": c} for c in sorted(CUSTOMER_INDEX_DF["COUNTRY"].dropna().unique())]
+    if "COUNTRY" in CUSTOMER_INDEX_DF.columns else []
 )
 
+# Distinct reporting snapshot dates available in the data — lets the user view
+# a customer's fleet "as of" a given COB_DATE instead of always the latest
+# known snapshot (a vehicle's IN FLEET / SOLD / ... status is only ever true
+# as of a specific COB_DATE).
+COB_DATE_OPTIONS = (
+    sorted(CV_DF["COB_DATE"].dropna().unique()) if "COB_DATE" in CV_DF.columns else []
+)
+ASOF_DATE_OPTIONS = [
+    {"label": pd.Timestamp(d).strftime("%Y-%m-%d"), "value": pd.Timestamp(d).isoformat()}
+    for d in COB_DATE_OPTIONS
+]
+
 
 # =============================================================================
-# Rating formatting (same convention as client_rating_at_origination.py)
+# Domain helpers
 # =============================================================================
 
-def _fmt_rating(col: str, v) -> str | None:
+def format_millions(value: float) -> str:
+    s = f"{value / 1_000_000:.4f}".rstrip("0").rstrip(".")
+    return s if s else "0"
+
+
+def _json_safe_value(v):
     if v is None:
         return None
     try:
@@ -236,438 +263,254 @@ def _fmt_rating(col: str, v) -> str | None:
             return None
     except (TypeError, ValueError):
         pass
-    if RATING_COL_NUMERIC.get(col):
-        try:
-            f = float(v)
-            return str(int(f)) if f.is_integer() else f"{f:g}"
-        except (TypeError, ValueError):
-            return str(v)
-    return str(v).strip()
+    if isinstance(v, pd.Timestamp):
+        return v.isoformat()
+    if isinstance(v, np.integer):
+        return int(v)
+    if isinstance(v, np.floating):
+        return float(v)
+    return v
 
 
-RATING_ORDER_HINT = {  # coarse "good..bad" ordering for the "good rating but arrears" check
-    "01": 1, "02-": 2, "02": 3, "02+": 4, "03-": 5, "03": 6, "03+": 7,
+def _json_safe_dict(d: dict) -> dict:
+    return {k: _json_safe_value(v) for k, v in d.items()}
+
+
+def _json_safe_records(df: pd.DataFrame) -> list[dict]:
+    return [_json_safe_dict(row) for row in df.to_dict("records")]
+
+
+def _customer_profile(customer_rows: pd.DataFrame) -> dict:
+    """Latest *known* (non-null) value per profile field for this customer —
+    forward-filled across their snapshots so a blank latest row doesn't hide a
+    real, earlier value (same fix already validated in the Use Case 1 dashboard)."""
+    if customer_rows.empty:
+        return {}
+    d = customer_rows.sort_values("COB_DATE") if "COB_DATE" in customer_rows.columns else customer_rows
+    fill_cols = [c for c in [
+        "COUNTRY", "CUSTOMER_NAME", "GROUP_RATING", "COUNTERPARTY_RATING", "CLS_GROUP_RATING",
+        "ARVAL_INDUSTRY_CODE_CLS_DESCRIPTION", "SHARED_CLIENT_FLAG",
+    ] if c in d.columns]
+    d = d.copy()
+    if fill_cols:
+        d[fill_cols] = d[fill_cols].ffill()
+    last = d.iloc[-1]
+    return {c: last.get(c) for c in fill_cols}
+
+
+def _customer_exposure(customer_rows: pd.DataFrame) -> float:
+    """EXPOSURE_AMOUNT_LTR / PENDING_ORDERS are reported per contract, not
+    duplicated identically across every row of the customer (a sold contract
+    reports 0 while another of the same customer's contracts still in fleet
+    keeps its real exposure). So each distinct contract/vehicle is taken at
+    its own latest known snapshot (same key as the vehicle list itself), then
+    summed — this is what "same formula as Use Case 1" (LTR + pending orders,
+    dedup before summing) means once a customer can have more than one
+    contract: dedup per contract, not collapse the whole customer to one row."""
+    if customer_rows.empty:
+        return 0.0
+    d = customer_rows.copy()
+    ltr = d["EXPOSURE_AMOUNT_LTR"] if "EXPOSURE_AMOUNT_LTR" in d.columns else 0.0
+    pending = d["PENDING_ORDERS"] if "PENDING_ORDERS" in d.columns else 0.0
+    d["EXPOSURE"] = (ltr.fillna(0) if hasattr(ltr, "fillna") else ltr) + \
+                     (pending.fillna(0) if hasattr(pending, "fillna") else pending)
+    if "COB_DATE" in d.columns:
+        d = d.sort_values("COB_DATE")
+    keys = [k for k in UNIQUE_KEY_COLS if k in d.columns]
+    if keys:
+        d = d.drop_duplicates(subset=keys, keep="last")
+    return float(d["EXPOSURE"].sum())
+
+
+def _pair_units(columns) -> tuple[dict, set]:
+    """For every "<X>_UNIT" column, pair it with the field(s) it describes:
+    an exact-name match (ENGINE_SIZE_UNIT -> ENGINE_SIZE) pairs with that one
+    field; otherwise every other column sharing the same prefix
+    (FUEL_CONSUMPTION_UNIT -> FUEL_CONSUMPTION_THEORETICAL/HIGHWAY/URBAN) shares
+    that one unit. Returns (value_field -> unit_field, set of unit fields that
+    are consumed and must never render as their own row)."""
+    cols = set(columns)
+    unit_cols = [c for c in cols if c.endswith("_UNIT")]
+    pairing: dict[str, str] = {}
+    consumed: set[str] = set()
+    for uc in unit_cols:
+        prefix = uc[: -len("_UNIT")]
+        if not prefix:
+            continue
+        if prefix in cols:
+            pairing[prefix] = uc
+            consumed.add(uc)
+        else:
+            group_prefix = prefix + "_"
+            members = [c for c in cols if c.startswith(group_prefix) and c != uc and not c.endswith("_UNIT")]
+            if members:
+                for m in members:
+                    pairing[m] = uc
+                consumed.add(uc)
+    return pairing, consumed
+
+
+_LABEL_ACRONYMS = {"ID", "EUR", "HP", "CO2"}
+
+
+def _pretty_label(field: str) -> str:
+    words = field.split("_")
+    out = []
+    for w in words:
+        if w.upper() in _LABEL_ACRONYMS:
+            out.append(w.upper())
+        elif w.upper() == "OF":
+            out.append("of")
+        else:
+            out.append(w.capitalize())
+    return " ".join(out)
+
+
+FIELD_LABEL_OVERRIDES = {
+    "VEHICLE_ID": "Vehicle ID",
+    "BRAND_UPDATE": "Brand",
+    "MARKET_MODEL": "Model",
+    "VEHICLE_MODEL": "Model",
+    "MODEL_CATALOG": "Model (Catalog)",
+    "VEHICLE_CLASS": "Vehicle Class",
+    "MARKET_BODY_GROUP": "Body Type",
+    "VEHICLE_BODY_TYPE": "Body Type",
+    "VEHICLE_SEGMENT_PROXY": "Segment",
+    "NORMALISED_VEHICLE_TYPE": "Normalised Vehicle Type",
+    "CLS_VEHICLE_TYPE": "CLS Vehicle Type",
+    "BODY_COLOR": "Body Color",
+    "VEHICLE_PRICE_EUR": "Vehicle Price",
+    "CATALOG_PRICE": "Catalog Price",
+    "NUMBER_OF_DOORS": "Doors",
+    "NUMBER_OF_CYLENDER": "Cylinders",
+    "NUMBER_OF_SEATS": "Seats",
+    "FISCAL_POWER": "Fiscal Power",
+    "NUMBER_OF_SPEED": "Gears / Speeds",
+    "ENGINE_SIZE": "Engine Size",
+    "ENGINE_POWER_HP": "Engine Power",
+    "GEARBOX": "Gearbox",
+    "AUTONOMY": "Autonomy (Electric Range)",
+    "FUEL_TYPE": "Fuel Type",
+    "FUEL_TYPE2": "Fuel Type (Secondary)",
+    "FUEL_CONSUMPTION_THEORETICAL": "Fuel Consumption (Combined)",
+    "FUEL_CONSUMPTION_HIGHWAY": "Fuel Consumption (Highway)",
+    "FUEL_CONSUMPTION_URBAN": "Fuel Consumption (Urban)",
+    "VA_CO2_EMSS_REAL": "CO2 Emissions",
+    "NOVA_ASSET_STATUS": "Asset Status",
+    "DELIVERY_DATE": "Delivery Date",
+    "REGISTRATION_DATE": "Registration Date",
+    "CONTRACT_START_DATE": "Contract Start",
+    "CONTRACT_END_DATE": "Contract End",
+    "CONTRACT_END_DATE_AMENDED": "Contract End (Amended)",
+    "CONTRACT_FINAL_END": "Contract Final End",
+    "DATE_OF_ORDER": "Order Date",
+    "DATE_OF_QUOTATION": "Quotation Date",
+    "EXTENSION_DATE": "Extension Date",
 }
 
 
-def _rating_is_top_band(col: str, disp: str | None) -> bool | None:
-    if disp is None:
+def _field_label(field: str) -> str:
+    return FIELD_LABEL_OVERRIDES.get(field, _pretty_label(field))
+
+
+def _fmt_date(value) -> str | None:
+    if value in (None, "", "NaT"):
         return None
-    if RATING_COL_NUMERIC.get(col):
-        try:
-            return float(disp) <= 3
-        except (TypeError, ValueError):
+    try:
+        ts = pd.to_datetime(value)
+        if pd.isna(ts):
             return None
-    return RATING_ORDER_HINT.get(disp, 99) <= 3
+        return ts.strftime("%Y-%m-%d")
+    except Exception:
+        return str(value)
 
 
-# =============================================================================
-# NOVA customer-level state — latest known rating/exposure/arrears per
-# customer, plus the validated Total Exposure formula (dedup per contract,
-# summed) from client_rating_at_origination.py / customer_vehicle_explorer.py
-# =============================================================================
+def _fmt_field_value(field: str, value, unit_value=None) -> str | None:
+    if value in (None, ""):
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
 
-def _build_nova_customer_state(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty or "ID_CUSTOMER" not in df.columns:
-        return pd.DataFrame()
+    if field in DATE_FIELDS:
+        return _fmt_date(value)
 
-    d = df.dropna(subset=["ID_CUSTOMER"]).copy()
-    d["ID_CUSTOMER"] = d["ID_CUSTOMER"].astype(str).str.strip()
-
-    rating_cols = [r["col"] for r in RATING_COLUMNS if r["col"] in d.columns]
-    profile_cols = [c for c in (["COUNTRY"] + rating_cols + ARRS_COLUMNS_PRESENT) if c in d.columns]
-    ds = d.sort_values("COB_DATE") if "COB_DATE" in d.columns else d
-    if profile_cols:
-        ds = ds.copy()
-        ds[profile_cols] = ds.groupby("ID_CUSTOMER")[profile_cols].ffill()
-    latest = ds.drop_duplicates(subset=["ID_CUSTOMER"], keep="last")
-
-    keys = [k for k in UNIQUE_KEY_COLS if k in d.columns]
-    exp = d.copy()
-    ltr = exp["EXPOSURE_AMOUNT_LTR"] if "EXPOSURE_AMOUNT_LTR" in exp.columns else 0.0
-    pending = exp["PENDING_ORDERS"] if "PENDING_ORDERS" in exp.columns else 0.0
-    exp["_EXPOSURE"] = (ltr.fillna(0) if hasattr(ltr, "fillna") else ltr) + \
-                        (pending.fillna(0) if hasattr(pending, "fillna") else pending)
-    if "COB_DATE" in exp.columns:
-        exp = exp.sort_values("COB_DATE")
-    if keys:
-        exp = exp.drop_duplicates(subset=keys + ["ID_CUSTOMER"], keep="last")
-    total_exposure = exp.groupby("ID_CUSTOMER")["_EXPOSURE"].sum().rename("TOTAL_EXPOSURE")
-
-    out = latest.merge(total_exposure, on="ID_CUSTOMER", how="left")
-    for col in rating_cols:
-        out[f"{col}_DISP"] = out[col].apply(lambda v, c=col: _fmt_rating(c, v))
-
-    if ARRS_COLUMNS_PRESENT:
-        present = [(c, l) for c, l in ARRS_BTWN_BUCKETS if c in ARRS_COLUMNS_PRESENT]
-        out["TOTAL_ARREARS"] = sum(out[c].fillna(0) for c, _ in present) + \
-            (out["ARRS_MORE_270D"].fillna(0) if "ARRS_MORE_270D" in ARRS_COLUMNS_PRESENT else 0.0)
+    if isinstance(value, bool):
+        s = "Yes" if value else "No"
+    elif isinstance(value, (int, float, np.integer, np.floating)):
+        num = float(value)
+        s = f"{int(num):,}" if num.is_integer() else f"{num:,.2f}"
+        if field.endswith("_EUR") or field == "CATALOG_PRICE":
+            s = f"€{s}"
     else:
-        out["TOTAL_ARREARS"] = np.nan
-
-    n_vehicles = (d.drop_duplicates(subset=keys + ["ID_CUSTOMER"]) if keys else d) \
-        .groupby("ID_CUSTOMER").size().rename("N_VEHICLES")
-    out = out.merge(n_vehicles, on="ID_CUSTOMER", how="left")
-    out["N_VEHICLES"] = out["N_VEHICLES"].fillna(0).astype(int)
-    return out
-
-
-NOVA_CUSTOMER_STATE = _build_nova_customer_state(NOVA_DF)
-
-
-# =============================================================================
-# CLS customer-level state — latest period per customer
-# =============================================================================
-
-def _build_cls_customer_state(df: pd.DataFrame, col: dict) -> pd.DataFrame:
-    id_col, date_col = col.get("Id Customer"), col.get("Period End")
-    if df.empty or not id_col or id_col not in df.columns:
-        return pd.DataFrame()
-    d = df.dropna(subset=[id_col]).copy()
-    if date_col and date_col in d.columns:
-        d = d.sort_values(date_col)
-    return d.drop_duplicates(subset=[id_col], keep="last")
-
-
-CLS_CUSTOMER_STATE = _build_cls_customer_state(CLS_DF, CLS_COL)
-
-
-# =============================================================================
-# Check framework — every check returns a small dict; rendered as a colored
-# checklist (good / warning / critical / info) in the UI.
-# =============================================================================
-
-def _check(check_id, title, status, detail, metric=None):
-    return {"id": check_id, "title": title, "status": status, "detail": detail, "metric": metric}
-
-
-def _rate(n_bad, n_total, warn_pct=0.01, crit_pct=0.05):
-    if n_total == 0:
-        return "info"
-    pct = n_bad / n_total
-    if pct > crit_pct:
-        return "critical"
-    if pct > warn_pct:
-        return "warning"
-    return "good"
-
-
-def run_nova_quality_checks(df: pd.DataFrame, state: pd.DataFrame) -> list[dict]:
-    """Credit/arrears-focused checks on NOVA — same spirit as the CLS checks
-    below, not generic structural QA (that lives in the source pipeline, not
-    a credit-risk control center)."""
-    if df.empty:
-        return [_check("nova-empty", "NOVA data loaded", "critical", "No NOVA rows loaded — check DATA_FOLDER / COUNTRIES_TO_READ.")]
-    checks = []
-    n = len(df)
-    n_state = len(state) if not state.empty else 0
-
-    if "EXPOSURE_AMOUNT_LTR" in df.columns:
-        n_neg = int((df["EXPOSURE_AMOUNT_LTR"] < 0).sum())
-        checks.append(_check("nova-neg-exp", "Negative EXPOSURE_AMOUNT_LTR",
-                              _rate(n_neg, n), f"{n_neg:,} rows have a negative LTR exposure.", f"{n_neg:,}"))
-
-    if n_state and "CLS_GROUP_RATING_DISP" in state.columns:
-        n_nr = int(state["CLS_GROUP_RATING_DISP"].isna().sum())
-        checks.append(_check("nova-nr-rating", "Customers with a known CLS rating",
-                              _rate(n_nr, n_state, warn_pct=0.10, crit_pct=0.30),
-                              f"{n_nr:,} / {n_state:,} customers have no CLS_GROUP_RATING (shown as NR).",
-                              f"{100 * (1 - n_nr / n_state):.1f}% rated"))
-
-    if not ARRS_COLUMNS_PRESENT:
-        checks.append(_check("nova-arrs-missing", "Arrears columns present in NOVA", "info",
-                              "None of the ARRS_* columns exist in this NOVA export, so arrears-based credit "
-                              "checks on NOVA are skipped here — see the CLS checks below, and the Adjusted "
-                              "Exposure tab (which falls back to CLS arrears matched by NOVA's own COB_DATE)."))
-        return checks
-
-    present = [c for c, _ in ARRS_BTWN_BUCKETS if c in ARRS_COLUMNS_PRESENT]
-    neg_mask = pd.Series(False, index=df.index)
-    for c in present:
-        neg_mask = neg_mask | (df[c] < 0)
-    n_neg_arr = int(neg_mask.sum())
-    checks.append(_check("nova-neg-arrears", "Negative arrears bucket values",
-                          _rate(n_neg_arr, n), f"{n_neg_arr:,} rows have a negative value in an arrears bucket.",
-                          f"{n_neg_arr:,}"))
-
-    if n_state:
-        top_band = state["CLS_GROUP_RATING_DISP"].apply(lambda v: _rating_is_top_band("CLS_GROUP_RATING", v))
-        n_bad = int(((top_band == True) & (state["TOTAL_ARREARS"].fillna(0) > 0)).sum())  # noqa: E712
-        checks.append(_check("nova-good-rating-arrears", "Top-band rating but has arrears",
-                              _rate(n_bad, n_state, warn_pct=0.005, crit_pct=0.02),
-                              f"{n_bad:,} customers carry a top-3 CLS rating band yet have Total Arrears > 0 — "
-                              f"rating may not reflect real payment behavior.", f"{n_bad:,}"))
-
-        n_odd = int(((state["TOTAL_ARREARS"].fillna(0) > 0) & (state["TOTAL_EXPOSURE"].fillna(0) <= 0)).sum())
-        checks.append(_check("nova-arrears-no-exposure", "Arrears reported with zero exposure",
-                              _rate(n_odd, n_state, warn_pct=0.005, crit_pct=0.02),
-                              f"{n_odd:,} customers show arrears but zero total exposure — financially odd "
-                              f"(money owed with nothing currently at risk).", f"{n_odd:,}"))
-
-    return checks
-
-
-def run_cls_quality_checks(df: pd.DataFrame, col: dict) -> list[dict]:
-    if not CLS_AVAILABLE:
-        return [_check("cls-missing", "CLS data loaded", "info", CLS_MISSING_MSG)]
-    checks = []
-    n = len(df)
-
-    total_c, btwn_cs, tail_c = col.get("Total Arrears"), [col.get(l) for l in CLS_ARREARS_BTWN], col.get("Arrears Above 270 Days")
-    if total_c and all(btwn_cs) and tail_c and all(c in df.columns for c in [total_c, tail_c] + btwn_cs):
-        computed = sum(df[c].fillna(0) for c in btwn_cs) + df[tail_c].fillna(0)
-        diff = (df[total_c].fillna(0) - computed).abs()
-        n_mismatch = int((diff > 1).sum())
-        checks.append(_check("cls-arrears-formula", "'Total Arrears' = sum of buckets",
-                              _rate(n_mismatch, n),
-                              f"{n_mismatch:,} / {n:,} rows where Total Arrears differs from the bucket "
-                              f"sum by more than 1 unit — validates the formula used everywhere else in "
-                              f"this project.", f"{100 * (1 - n_mismatch / n):.1f}% match"))
-
-    exp_ltr_c, pending_c, total_exp_c = col.get("Exposure Amount (LTR)"), col.get("Pending Orders Amount"), \
-        col.get("Total Exposure (incl. Pending Ord) (LTR)")
-    if exp_ltr_c and pending_c and total_exp_c and all(c in df.columns for c in [exp_ltr_c, pending_c, total_exp_c]):
-        computed_exp = df[exp_ltr_c].fillna(0) + df[pending_c].fillna(0)
-        diff = (df[total_exp_c].fillna(0) - computed_exp).abs()
-        n_mismatch = int((diff > 1).sum())
-        checks.append(_check("cls-exposure-formula", "'Total Exposure' = LTR + Pending Orders",
-                              _rate(n_mismatch, n),
-                              f"{n_mismatch:,} / {n:,} rows differ by more than 1 unit.",
-                              f"{100 * (1 - n_mismatch / n):.1f}% match"))
-
-    pb_c, pe_c = col.get("Period Begin"), col.get("Period End")
-    if pb_c and pe_c and pb_c in df.columns and pe_c in df.columns:
-        both = df.dropna(subset=[pb_c, pe_c])
-        n_bad = int((both[pb_c] > both[pe_c]).sum())
-        checks.append(_check("cls-period-order", "Period Begin ≤ Period End",
-                              _rate(n_bad, n), f"{n_bad:,} rows have Period Begin after Period End.", f"{n_bad:,}"))
-
-    id_c = col.get("Id Customer")
-    if id_c and pe_c and id_c in df.columns and pe_c in df.columns:
-        n_dupe = int(df.duplicated(subset=[id_c, pe_c]).sum())
-        checks.append(_check("cls-dupe-period", "Duplicate (customer, period) rows",
-                              _rate(n_dupe, n), f"{n_dupe:,} duplicate (Id Customer, Period End) rows.", f"{n_dupe:,}"))
-
-    eod_c, eod_date_c = col.get("Event Of Default"), col.get("Date Event Of Default")
-    if eod_c and eod_date_c and eod_c in df.columns and eod_date_c in df.columns:
-        flag = _as_bool_flag(df[eod_c])
-        n_bad = int(((flag == True) & df[eod_date_c].isna()).sum())  # noqa: E712
-        checks.append(_check("cls-eod-consistency", "Event Of Default has a default date",
-                              _rate(n_bad, n), f"{n_bad:,} rows flagged in default with no Date Event Of Default.",
-                              f"{n_bad:,}"))
-
-    exp_c, limit_c = col.get("Exposure Amount (LTR)"), col.get("Limit Value Amount (LTR)")
-    if exp_c and limit_c and exp_c in df.columns and limit_c in df.columns:
-        both = df.dropna(subset=[exp_c, limit_c])
-        n_over = int((both[exp_c] > both[limit_c]).sum())
-        checks.append(_check("cls-over-limit", "Customers within their credit limit",
-                              _rate(n_over, n, warn_pct=0.02, crit_pct=0.08),
-                              f"{n_over:,} rows have Exposure Amount (LTR) above Limit Value Amount (LTR).",
-                              f"{n_over:,} over-limit"))
-
-    rating_c, rating_date_c, pe_c2 = col.get("Obligor Rating (CLS)"), col.get("Obligor Rating Date (CLS)"), col.get("Period End")
-    if rating_date_c and pe_c2 and rating_date_c in df.columns and pe_c2 in df.columns:
-        both = df.dropna(subset=[rating_date_c, pe_c2])
-        stale_days = (both[pe_c2] - both[rating_date_c]).dt.days
-        n_stale = int((stale_days > 365).sum())
-        checks.append(_check("cls-stale-rating", "Rating refreshed within the last 12 months",
-                              _rate(n_stale, n, warn_pct=0.05, crit_pct=0.15),
-                              f"{n_stale:,} rows have a rating older than 365 days vs. their Period End.",
-                              f"{n_stale:,} stale"))
-
-    # "Invented" cross-checks — internally inconsistent risk signals worth a look.
-    if total_c and rating_c and total_c in df.columns and rating_c in df.columns:
-        rat_disp = df[rating_c].apply(lambda v: _fmt_rating("CLS_GROUP_RATING", v))
-        top_band = rat_disp.apply(lambda v: _rating_is_top_band("CLS_GROUP_RATING", v))
-        n_bad = int(((top_band == True) & (df[total_c].fillna(0) > 0)).sum())  # noqa: E712
-        checks.append(_check("cls-good-rating-arrears", "Top-band rating but has arrears",
-                              _rate(n_bad, n, warn_pct=0.005, crit_pct=0.02),
-                              f"{n_bad:,} rows carry a top-3 rating band yet report Total Arrears > 0 — "
-                              f"rating may not reflect real payment behavior.", f"{n_bad:,}"))
-
-    watch_c = col.get("Credit Watch Indicator (CLS)")
-    if watch_c and rating_c and watch_c in df.columns and rating_c in df.columns:
-        watch_flag = _as_bool_flag(df[watch_c])
-        rat_disp = df[rating_c].apply(lambda v: _fmt_rating("CLS_GROUP_RATING", v))
-        top_band = rat_disp.apply(lambda v: _rating_is_top_band("CLS_GROUP_RATING", v))
-        n_bad = int(((watch_flag == True) & (top_band == True)).sum())  # noqa: E712
-        checks.append(_check("cls-watch-vs-rating", "Credit Watch flagged with a top-band rating",
-                              _rate(n_bad, n, warn_pct=0.005, crit_pct=0.02),
-                              f"{n_bad:,} rows are on Credit Watch despite a top-3 rating band.", f"{n_bad:,}"))
-
-    return checks
-
-
-# =============================================================================
-# Cross-dataset comparison — matched customers, NOVA-computed vs CLS-reported
-# =============================================================================
-
-def build_comparison() -> pd.DataFrame:
-    if not CLS_AVAILABLE or NOVA_CUSTOMER_STATE.empty:
-        return pd.DataFrame()
-    id_c, rating_c, total_exp_c, total_arr_c = (
-        CLS_COL.get("Id Customer"), CLS_COL.get("Obligor Rating (CLS)"),
-        CLS_COL.get("Total Exposure (incl. Pending Ord) (LTR)"), CLS_COL.get("Total Arrears"),
-    )
-    if not id_c:
-        return pd.DataFrame()
-
-    right = CLS_CUSTOMER_STATE.copy()
-    # Case-insensitive on purpose — CLS and NOVA are separate systems and one
-    # exporting "es12345678" while the other has "ES12345678" would otherwise
-    # silently produce zero matches despite being the same customer.
-    right["_ID"] = right[id_c].astype(str).str.strip().str.upper()
-    left = NOVA_CUSTOMER_STATE.copy()
-    left["_ID"] = left["ID_CUSTOMER"].astype(str).str.strip().str.upper()
-
-    merged = left.merge(right, on="_ID", how="inner", suffixes=("_NOVA", "_CLS"))
-    if merged.empty:
-        return merged
-
-    # NaN-aware on purpose: a customer missing a value on one side is a
-    # "no data to compare" case, not a fake mismatch against an assumed 0 —
-    # filling with 0 here used to make missing-CLS-exposure customers look
-    # like the biggest "mismatches" when they're really just unrated/unreported.
-    if rating_c and rating_c in merged.columns:
-        merged["CLS_RATING_DISP"] = merged[rating_c].apply(lambda v: _fmt_rating("CLS_GROUP_RATING", v))
-        both_rated = merged["CLS_GROUP_RATING_DISP"].notna() & merged["CLS_RATING_DISP"].notna()
-        merged["RATING_MATCH"] = np.where(both_rated, merged["CLS_GROUP_RATING_DISP"] == merged["CLS_RATING_DISP"], np.nan)
-    if total_exp_c and total_exp_c in merged.columns:
-        merged["EXPOSURE_DIFF"] = merged["TOTAL_EXPOSURE"] - merged[total_exp_c]
-        merged["BOTH_HAVE_EXPOSURE"] = merged["TOTAL_EXPOSURE"].notna() & merged[total_exp_c].notna()
-    if total_arr_c and total_arr_c in merged.columns:
-        merged["ARREARS_DIFF"] = merged["TOTAL_ARREARS"] - merged[total_arr_c]
-        merged["BOTH_HAVE_ARREARS"] = merged["TOTAL_ARREARS"].notna() & merged[total_arr_c].notna()
-    return merged
-
-
-COMPARISON_DF = build_comparison()
-
-
-# =============================================================================
-# Arrears onset — first period a customer shows Total Arrears > 0, vs. their
-# eventual Event Of Default date (if any). Answers "how much warning did the
-# arrears give before the client actually defaulted?"
-# =============================================================================
-
-def build_arrears_onset() -> pd.DataFrame:
-    if not CLS_AVAILABLE:
-        return pd.DataFrame()
-    id_c, pe_c, total_c, eod_c, eod_date_c = (
-        CLS_COL.get("Id Customer"), CLS_COL.get("Period End"), CLS_COL.get("Total Arrears"),
-        CLS_COL.get("Event Of Default"), CLS_COL.get("Date Event Of Default"),
-    )
-    if not (id_c and pe_c and total_c):
-        return pd.DataFrame()
-
-    d = CLS_DF.dropna(subset=[id_c, pe_c]).copy()
-    with_arrears = d[d[total_c].fillna(0) > 0]
-    onset = with_arrears.sort_values(pe_c).drop_duplicates(subset=[id_c], keep="first")
-    onset = onset[[id_c, pe_c]].rename(columns={id_c: "ID_CUSTOMER", pe_c: "ONSET_DATE"})
-
-    ever_default = pd.DataFrame()
-    if eod_c and eod_c in d.columns:
-        flag = _as_bool_flag(d[eod_c])
-        defaulted = d[flag == True]  # noqa: E712
-        if eod_date_c and eod_date_c in defaulted.columns:
-            ever_default = defaulted.dropna(subset=[eod_date_c]).sort_values(eod_date_c) \
-                .drop_duplicates(subset=[id_c], keep="first")[[id_c, eod_date_c]] \
-                .rename(columns={id_c: "ID_CUSTOMER", eod_date_c: "DEFAULT_DATE"})
-
-    out = onset.merge(ever_default, on="ID_CUSTOMER", how="left") if not ever_default.empty else onset.assign(DEFAULT_DATE=pd.NaT)
-    out["DAYS_TO_DEFAULT"] = (out["DEFAULT_DATE"] - out["ONSET_DATE"]).dt.days
-    return out
-
-
-ARREARS_ONSET_DF = build_arrears_onset()
-
-
-# =============================================================================
-# Adjusted exposure — the way larger financial institutions size real credit
-# exposure folds unpaid arrears into it, not just the notional/contracted
-# amount: money that's overdue but not collected is still money at risk, on
-# top of what's already outstanding. Adjusted Exposure = Total Exposure
-# (LTR + Pending, dedup per contract) + arrears.
-#
-# The arrears figure always tracks NOVA's own COB_DATE (never CLS's Period
-# End) per the user's requirement: if NOVA carries its own ARRS_* columns,
-# those are used directly; otherwise CLS's Total Arrears is looked up "as of"
-# — the latest CLS Period End at or before that customer's own NOVA COB_DATE
-# — via merge_asof, the same backward-looking join used for rating-at-date
-# elsewhere in this project, just vectorized here for the whole portfolio.
-# =============================================================================
-
-ADJUSTED_EXPOSURE_ARREARS_SOURCE = "unavailable"
-
-
-def build_adjusted_exposure() -> pd.DataFrame:
-    global ADJUSTED_EXPOSURE_ARREARS_SOURCE
-    if NOVA_CUSTOMER_STATE.empty:
-        return pd.DataFrame()
-
-    d = NOVA_CUSTOMER_STATE.dropna(subset=["TOTAL_EXPOSURE"]).copy()
-
-    if ARRS_COLUMNS_PRESENT:
-        d["ARREARS_USED"] = d["TOTAL_ARREARS"].fillna(0)
-        ADJUSTED_EXPOSURE_ARREARS_SOURCE = "NOVA's own arrears columns"
-    elif CLS_AVAILABLE and CLS_COL.get("Id Customer") and CLS_COL.get("Period End") and CLS_COL.get("Total Arrears"):
-        id_c, pe_c, total_c = CLS_COL["Id Customer"], CLS_COL["Period End"], CLS_COL["Total Arrears"]
-        left = d[["ID_CUSTOMER", "COB_DATE"]].dropna(subset=["COB_DATE"]).sort_values("COB_DATE")
-        right = (CLS_DF[[id_c, pe_c, total_c]].dropna(subset=[pe_c])
-                 .rename(columns={id_c: "ID_CUSTOMER", pe_c: "COB_DATE", total_c: "ARREARS_USED"})
-                 .sort_values("COB_DATE"))
-        # merge_asof requires an exact datetime64 dtype match on the join key —
-        # NOVA's COB_DATE and CLS's Period End can come out at different
-        # (us/ns) resolutions after independent pd.to_datetime() parsing.
-        left["COB_DATE"] = left["COB_DATE"].astype("datetime64[ns]")
-        right["COB_DATE"] = right["COB_DATE"].astype("datetime64[ns]")
-        matched = pd.merge_asof(left, right, on="COB_DATE", by="ID_CUSTOMER", direction="backward")
-        d = d.merge(matched[["ID_CUSTOMER", "ARREARS_USED"]], on="ID_CUSTOMER", how="left")
-        d["ARREARS_USED"] = d["ARREARS_USED"].fillna(0)
-        ADJUSTED_EXPOSURE_ARREARS_SOURCE = "CLS Total Arrears, as of each customer's own latest NOVA COB_DATE"
-    else:
-        d["ARREARS_USED"] = 0.0
-        ADJUSTED_EXPOSURE_ARREARS_SOURCE = "unavailable — no arrears source on either side"
-
-    d["ADJUSTED_EXPOSURE"] = d["TOTAL_EXPOSURE"] + d["ARREARS_USED"]
-    # NaN (not 0%) when raw exposure is 0 but arrears exist — that's a jump
-    # from nothing to something at risk, not "no change", and must sort/read
-    # as the most dramatic case rather than disappear at the bottom.
-    d["UPLIFT_PCT"] = np.where(d["TOTAL_EXPOSURE"] > 0, 100 * d["ARREARS_USED"] / d["TOTAL_EXPOSURE"], np.nan)
-    return d
-
-
-ADJUSTED_EXPOSURE_DF = build_adjusted_exposure()
-
-
-# =============================================================================
-# CLS adjusted exposure — the CLS-side mirror of ADJUSTED_EXPOSURE_DF, built
-# purely from CLS's own reported fields (Total Exposure + Total Arrears, both
-# already on CLS_CUSTOMER_STATE). No customer-ID matching against NOVA is
-# needed for this — it powers the country-level comparison tab, which stays
-# useful even when the two systems' IDs don't line up.
-# =============================================================================
-
-def build_cls_adjusted() -> pd.DataFrame:
-    if not CLS_AVAILABLE:
-        return pd.DataFrame()
-    country_c = CLS_COL.get("Code Country")
-    rating_c = CLS_COL.get("Obligor Rating (CLS)")
-    exp_c = CLS_COL.get("Total Exposure (incl. Pending Ord) (LTR)")
-    arr_c = CLS_COL.get("Total Arrears")
-    if not exp_c:
-        return pd.DataFrame()
-
-    d = CLS_CUSTOMER_STATE.copy()
-    d["COUNTRY"] = d[country_c] if country_c else None
-    d["RATING_DISP"] = d[rating_c].apply(lambda v: _fmt_rating("CLS_GROUP_RATING", v)) if rating_c else None
-    d["RAW_EXPOSURE"] = d[exp_c]
-    d["ARREARS_USED"] = d[arr_c].fillna(0) if arr_c else 0.0
-    d["ADJUSTED_EXPOSURE"] = d["RAW_EXPOSURE"].fillna(0) + d["ARREARS_USED"]
-    return d
-
-
-CLS_ADJUSTED_DF = build_cls_adjusted()
+        s = str(value)
+
+    if unit_value not in (None, ""):
+        try:
+            if not pd.isna(unit_value):
+                s = f"{s} {unit_value}"
+        except (TypeError, ValueError):
+            s = f"{s} {unit_value}"
+    return s
+
+
+VEHICLE_DETAIL_SECTIONS: list[tuple[str, list]] = [
+    ("Identification", [
+        "VEHICLE_ID", "BRAND_UPDATE",
+        "MARKET_MODEL",
+        "VEHICLE_CLASS",
+        ("MARKET_BODY_GROUP", "VEHICLE_BODY_TYPE"),
+        "VEHICLE_SEGMENT_PROXY", "NORMALISED_VEHICLE_TYPE", "CLS_VEHICLE_TYPE", "BODY_COLOR",
+    ]),
+    ("Pricing", [
+        "VEHICLE_PRICE_EUR", "CATALOG_PRICE",
+    ]),
+    ("Engine & Performance", [
+        "ENGINE_SIZE", "ENGINE_SIZE_UNIT", "ENGINE_POWER_HP", "FISCAL_POWER",
+        "NUMBER_OF_CYLENDER", "NUMBER_OF_SPEED", "GEARBOX", "AUTONOMY",
+    ]),
+    ("Fuel & Emissions", [
+        "FUEL_TYPE", "FUEL_TYPE2",
+        "FUEL_CONSUMPTION_THEORETICAL", "FUEL_CONSUMPTION_HIGHWAY", "FUEL_CONSUMPTION_URBAN",
+        "FUEL_CONSUMPTION_UNIT", "VA_CO2_EMSS_REAL",
+    ]),
+    ("Body & Comfort", [
+        "NUMBER_OF_DOORS", "NUMBER_OF_SEATS",
+    ]),
+    ("Status & Key Dates", [
+        "NOVA_ASSET_STATUS", "DELIVERY_DATE", "REGISTRATION_DATE",
+        "CONTRACT_START_DATE", "CONTRACT_END_DATE", "CONTRACT_END_DATE_AMENDED",
+        "CONTRACT_FINAL_END", "DATE_OF_ORDER", "DATE_OF_QUOTATION", "EXTENSION_DATE",
+    ]),
+]
+
+STATUS_COLORS = {
+    "IN FLEET": "#2f855a",
+    "SOLD": "#718096",
+    "ORDER ACTIVE": "#3182ce",
+    "ORDER ACTIVE - DELIVERED": "#2b6cb0",
+    "ORDER ACTIVE - REGISTERED": "#2b6cb0",
+    "TBI": "#d98943",
+    "TBI ORD.": "#d98943",
+    "TBI OTHER ORD. STATUS BLANK": "#d98943",
+    "DEHIRE": "#9b2c2c",
+    "ORD. REGISTERED": "#805ad5",
+}
+DEFAULT_STATUS_COLOR = "#a0aec0"
+RATING_NR_LABEL = "NR"
+
+
+def _rating_display(v) -> str:
+    if v in (None, ""):
+        return RATING_NR_LABEL
+    try:
+        if pd.isna(v):
+            return RATING_NR_LABEL
+    except (TypeError, ValueError):
+        pass
+    return str(v)
 
 
 # =============================================================================
@@ -675,24 +518,16 @@ CLS_ADJUSTED_DF = build_cls_adjusted()
 # =============================================================================
 
 app = Dash(__name__, suppress_callback_exceptions=True)
-app.title = "Credit Risk Control Center"
+app.title = "Customer & Vehicle Explorer"
 
-PAGE_STYLE = {"fontFamily": "Inter, -apple-system, sans-serif", "minHeight": "100vh", "background": "#f7fafc"}
-CARD_STYLE = {"background": "#ffffff", "borderRadius": "10px", "border": "1px solid #e2e8f0", "padding": "18px"}
-PANEL_TITLE_STYLE = {"fontWeight": "700", "fontSize": "14px", "color": "#1a1a2e", "marginBottom": "12px"}
-FIELD_TITLE_STYLE = {"fontSize": "11px", "color": "#718096", "fontWeight": "600", "marginBottom": "4px"}
-TABLE_STYLE = {"width": "100%", "borderCollapse": "collapse", "fontSize": "12.5px"}
-TH_STYLE = {"textAlign": "left", "padding": "8px 10px", "borderBottom": "2px solid #e2e8f0",
-            "color": "#718096", "fontSize": "11px", "fontWeight": "700", "textTransform": "uppercase"}
-TD_STYLE = {"padding": "8px 10px", "borderBottom": "1px solid #f0f2f5", "color": "#1a1a2e"}
 
-STATUS_COLOR = {"good": "#2f855a", "warning": "#d98943", "critical": "#9b2c2c", "info": "#3182ce"}
-STATUS_BG = {"good": "#f0fff4", "warning": "#fffaf0", "critical": "#fff5f5", "info": "#ebf8ff"}
-STATUS_ICON = {"good": "✓", "warning": "!", "critical": "✕", "info": "i"}
+# ── Style tokens (matches the visual language of use_case_1_heatmap_dashboard_4) ──
 
-DETAILS_BTN_STYLE = {
-    "padding": "5px 12px", "fontWeight": "700", "fontSize": "11px",
-    "background": "#ffffff", "color": "#3182ce", "border": "1px solid #bee3f8",
+PAGE_STYLE = {"fontFamily": "Inter, -apple-system, sans-serif", "minHeight": "100vh",
+              "background": "#f7fafc"}
+PRIMARY_BTN_STYLE = {
+    "padding": "9px 20px", "fontWeight": "700", "fontSize": "13px",
+    "background": "#3182ce", "color": "#fff", "border": "none",
     "borderRadius": "6px", "cursor": "pointer",
 }
 SECONDARY_BTN_STYLE = {
@@ -700,654 +535,359 @@ SECONDARY_BTN_STYLE = {
     "background": "#f7fafc", "color": "#718096", "border": "1px solid #cbd5e0",
     "borderRadius": "6px", "cursor": "pointer",
 }
+MORE_DETAILS_BTN_STYLE = {
+    "width": "100%", "marginTop": "12px", "padding": "8px 14px",
+    "fontWeight": "700", "fontSize": "12px",
+    "background": "#ffffff", "color": "#3182ce", "border": "1px solid #bee3f8",
+    "borderRadius": "6px", "cursor": "pointer",
+}
+CARD_STYLE = {
+    "background": "#ffffff", "borderRadius": "8px",
+    "border": "1px solid #e2e8f0", "padding": "18px",
+}
+CUSTOMER_CARD_STYLE = {
+    **CARD_STYLE,
+    "background": "#eef1f5", "border": "1px solid #dde3ea",
+}
+PANEL_TITLE_STYLE = {"fontWeight": "700", "fontSize": "13px", "color": "#1a1a2e",
+                      "marginBottom": "12px", "letterSpacing": "0.02em"}
+FIELD_TITLE_STYLE = {"fontSize": "11px", "color": "#718096", "fontWeight": "600",
+                      "marginBottom": "4px"}
 MODAL_OVERLAY_STYLE = {
     "display": "none", "position": "fixed", "top": "0", "left": "0",
     "width": "100%", "height": "100%", "backgroundColor": "rgba(15, 23, 42, 0.55)",
     "zIndex": "9999", "justifyContent": "center", "alignItems": "center",
 }
-MODAL_PANEL_STYLE = {
-    "background": "#ffffff", "borderRadius": "12px", "width": "900px",
+VEHICLE_MODAL_PANEL_STYLE = {
+    "background": "#ffffff", "borderRadius": "12px", "width": "820px",
     "maxWidth": "94vw", "maxHeight": "90vh", "overflowY": "auto",
     "padding": "30px", "boxShadow": "0 20px 60px rgba(0,0,0,0.25)",
 }
+ERROR_STYLE = {"color": "#c53030", "fontSize": "13px", "fontWeight": "600",
+               "padding": "10px 28px", "display": "none"}
 
 
 def _panel_title(text: str):
     return html.Div(text, style=PANEL_TITLE_STYLE)
 
 
-def _table(headers: list[str], rows: list[list]):
-    return html.Table(
-        [html.Thead(html.Tr([html.Th(h, style=TH_STYLE) for h in headers]))] +
-        [html.Tbody([html.Tr([html.Td(c, style=TD_STYLE) for c in r]) for r in rows])],
-        style=TABLE_STYLE,
-    )
+# ── Vehicle card ─────────────────────────────────────────────────────────────
 
-
-def _stat_tile(label: str, value: str, sub: str | None = None, accent: str = "#3182ce"):
-    return html.Div(
-        [
-            html.Div(label, style={"fontSize": "11px", "color": "#718096", "fontWeight": "700",
-                                    "textTransform": "uppercase", "letterSpacing": "0.04em", "marginBottom": "8px"}),
-            html.Div(value, style={"fontSize": "26px", "fontWeight": "800", "color": accent, "lineHeight": "1.1"}),
-            html.Div(sub or "", style={"fontSize": "12px", "color": "#a0aec0", "marginTop": "6px"}),
-        ],
-        style={**CARD_STYLE, "padding": "16px 18px"},
-    )
-
-
-def _check_row(check: dict):
-    color = STATUS_COLOR[check["status"]]
-    bg = STATUS_BG[check["status"]]
-    return html.Div(
-        [
-            html.Div(STATUS_ICON[check["status"]], style={
-                "width": "22px", "height": "22px", "borderRadius": "50%", "background": color,
-                "color": "#fff", "fontSize": "12px", "fontWeight": "800", "display": "flex",
-                "alignItems": "center", "justifyContent": "center", "flexShrink": "0",
-            }),
-            html.Div([
-                html.Div(check["title"], style={"fontWeight": "700", "fontSize": "13px", "color": "#1a1a2e"}),
-                html.Div(check["detail"], style={"fontSize": "12px", "color": "#718096", "marginTop": "2px"}),
-            ], style={"flex": "1"}),
-            html.Div(check["metric"] or "", style={"fontWeight": "700", "fontSize": "13px", "color": color,
-                                                     "whiteSpace": "nowrap", "marginLeft": "10px"}),
-        ],
-        style={"display": "flex", "alignItems": "flex-start", "gap": "12px", "padding": "12px 14px",
-               "background": bg, "borderRadius": "8px", "marginBottom": "8px", "border": f"1px solid {color}22"},
-    )
-
-
-def _checklist_card(title: str, checks: list[dict]):
-    return html.Div([_panel_title(title), html.Div([_check_row(c) for c in checks])],
-                     style={**CARD_STYLE, "marginBottom": "16px"})
-
-
-def _missing_cls_banner():
-    return html.Div(CLS_MISSING_MSG, style={
-        "background": "#fffaf0", "border": "1px solid #d98943", "color": "#8a5a1f",
-        "borderRadius": "8px", "padding": "12px 16px", "fontSize": "13px", "marginBottom": "16px",
+def _status_badge(status):
+    color = STATUS_COLORS.get(str(status).upper(), DEFAULT_STATUS_COLOR)
+    return html.Span(status, style={
+        "display": "inline-block", "padding": "3px 10px", "borderRadius": "999px",
+        "fontSize": "10px", "fontWeight": "700", "color": "#fff", "background": color,
+        "whiteSpace": "nowrap",
     })
 
 
-# ── Tab renderers ────────────────────────────────────────────────────────────
+def _vehicle_card(v: dict):
+    vid = v.get("VEHICLE_ID")
+    brand = v.get("BRAND_UPDATE") or "—"
+    # Only the matched Market Model (models.parquet join) is shown next to the
+    # brand — never a raw fallback field (VEHICLE_MODEL / MODEL_CATALOG), so
+    # what's displayed is always the properly-matched model, or "—".
+    model = v.get("MARKET_MODEL") or "—"
+    bodytype = v.get("MARKET_BODY_GROUP") or v.get("VEHICLE_BODY_TYPE") or "—"
+    status = v.get("NOVA_ASSET_STATUS") or "—"
+    delivery_s = _fmt_date(v.get("DELIVERY_DATE")) or "—"
+    price = v.get("VEHICLE_PRICE_EUR")
+    price_s = _fmt_field_value("VEHICLE_PRICE_EUR", price) or "—"
 
-def render_overview():
-    n_nova_cust = NOVA_CUSTOMER_STATE["ID_CUSTOMER"].nunique() if not NOVA_CUSTOMER_STATE.empty else 0
-    nova_total_exp = NOVA_CUSTOMER_STATE["TOTAL_EXPOSURE"].sum() if not NOVA_CUSTOMER_STATE.empty else 0
-    n_cls_cust = CLS_CUSTOMER_STATE[CLS_COL.get("Id Customer")].nunique() if CLS_AVAILABLE and CLS_COL.get("Id Customer") else 0
-    cls_total_exp = (CLS_CUSTOMER_STATE[CLS_COL["Total Exposure (incl. Pending Ord) (LTR)"]].sum()
-                      if CLS_AVAILABLE and CLS_COL.get("Total Exposure (incl. Pending Ord) (LTR)") else None)
-    n_matched = COMPARISON_DF["_ID"].nunique() if not COMPARISON_DF.empty else 0
-    n_default = 0
-    if CLS_AVAILABLE and CLS_COL.get("Event Of Default"):
-        n_default = int((_as_bool_flag(CLS_CUSTOMER_STATE[CLS_COL["Event Of Default"]]) == True).sum())  # noqa: E712
-
-    tiles = [
-        _stat_tile("NOVA customers", f"{n_nova_cust:,}", f"{COUNTRIES_TO_READ}"),
-        _stat_tile("NOVA total exposure", f"€{nova_total_exp / 1_000_000:,.2f}M", "LTR + pending, dedup per contract"),
-        _stat_tile("CLS customers", f"{n_cls_cust:,}" if CLS_AVAILABLE else "—",
-                    "latest period per customer" if CLS_AVAILABLE else "file not found"),
-        _stat_tile("CLS total exposure",
-                    f"€{cls_total_exp / 1_000_000:,.2f}M" if cls_total_exp is not None else "—",
-                    "as reported by CLS" if CLS_AVAILABLE else "file not found"),
-        _stat_tile("Matched customers", f"{n_matched:,}" if CLS_AVAILABLE else "—",
-                    "present in both NOVA and CLS" if CLS_AVAILABLE else "file not found"),
-        _stat_tile("Customers in default", f"{n_default:,}" if CLS_AVAILABLE else "—",
-                    "Event Of Default flag" if CLS_AVAILABLE else "file not found",
-                    accent="#9b2c2c" if n_default else "#3182ce"),
-    ]
-
-    children = [] if CLS_AVAILABLE else [_missing_cls_banner()]
-    children.append(html.Div(tiles, style={"display": "grid", "gridTemplateColumns": "repeat(3, 1fr)",
-                                            "gap": "14px"}))
-    return html.Div(children)
-
-
-def render_data_quality():
-    nova_checks = run_nova_quality_checks(NOVA_DF, NOVA_CUSTOMER_STATE)
-    cls_checks = run_cls_quality_checks(CLS_DF, CLS_COL)
-    return html.Div([
-        _checklist_card("NOVA — data quality", nova_checks),
-        _checklist_card("CLS — data quality", cls_checks),
-    ])
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.Span(f"{brand} {model}", style={"fontWeight": "700", "fontSize": "14px",
+                                                           "color": "#1a1a2e"}),
+                    _status_badge(status),
+                ],
+                style={"display": "flex", "justifyContent": "space-between", "alignItems": "center",
+                       "marginBottom": "8px", "gap": "8px"},
+            ),
+            html.Div(f"Vehicle ID {vid}", style={"fontSize": "11px", "color": "#a0aec0", "marginBottom": "10px"}),
+            html.Div(bodytype, style={"fontSize": "12px", "color": "#4a5568", "marginBottom": "10px"}),
+            html.Div(
+                [
+                    html.Span("Delivered", style={"fontSize": "11px", "color": "#a0aec0"}),
+                    html.Span(delivery_s, style={"fontSize": "12px", "color": "#4a5568", "fontWeight": "600"}),
+                ],
+                style={"display": "flex", "justifyContent": "space-between", "marginBottom": "6px"},
+            ),
+            html.Div(price_s, style={"fontSize": "15px", "fontWeight": "700", "color": "#3182ce"}),
+            html.Button(
+                "More details",
+                id={"type": "vehicle-more-details", "index": str(vid)}, n_clicks=0,
+                className="cve-more-details-btn", style=MORE_DETAILS_BTN_STYLE,
+            ),
+        ],
+        style=CARD_STYLE,
+    )
 
 
-def render_comparison():
-    if not CLS_AVAILABLE:
-        return _missing_cls_banner()
-    if COMPARISON_DF.empty:
-        # Zero matches almost always means the ID formats differ between the
-        # two systems (padding, prefix, case) rather than genuinely no
-        # overlap — show real samples from both sides so that's diagnosable
-        # here instead of a dead end.
-        nova_ids = sorted(NOVA_CUSTOMER_STATE["ID_CUSTOMER"].dropna().astype(str).unique())[:8]
-        id_c = CLS_COL.get("Id Customer")
-        cls_ids = sorted(CLS_CUSTOMER_STATE[id_c].dropna().astype(str).unique())[:8] if id_c else []
-        return html.Div([
-            html.P("No matching customers found between NOVA and CLS — the ID formats likely differ "
-                   "between the two systems. Compare the samples below.",
-                   style={"color": "#c53030", "fontWeight": "600", "marginBottom": "12px"}),
-            html.Div([
-                html.Div([_panel_title(f"NOVA ID_CUSTOMER samples ({NOVA_CUSTOMER_STATE['ID_CUSTOMER'].nunique():,} distinct)"),
-                          html.Ul([html.Li(i, style={"fontFamily": "monospace", "fontSize": "12px"}) for i in nova_ids])],
-                         style={**CARD_STYLE, "flex": "1"}),
-                html.Div([_panel_title(f"CLS Id Customer samples ({CLS_CUSTOMER_STATE[id_c].nunique():,} distinct)" if id_c else "CLS Id Customer"),
-                          html.Ul([html.Li(i, style={"fontFamily": "monospace", "fontSize": "12px"}) for i in cls_ids])
-                          if cls_ids else html.P("No 'Id Customer' column resolved on the CLS side.", style={"color": "#a0aec0"})],
-                         style={**CARD_STYLE, "flex": "1"}),
-            ], style={"display": "flex", "gap": "16px"}),
-        ])
+# ── Vehicle detail modal body ────────────────────────────────────────────────
 
-    n = len(COMPARISON_DF)
-    rating_match_pct = 100 * COMPARISON_DF["RATING_MATCH"].mean() if "RATING_MATCH" in COMPARISON_DF else None
-    exp_mae = COMPARISON_DF["EXPOSURE_DIFF"].abs().mean() if "EXPOSURE_DIFF" in COMPARISON_DF else None
-    arr_mae = COMPARISON_DF["ARREARS_DIFF"].abs().mean() if "ARREARS_DIFF" in COMPARISON_DF else None
+def _render_vehicle_detail(v: dict):
+    columns = set(v.keys())
+    pairing, consumed_units = _pair_units(columns)
 
-    tiles = [
-        _stat_tile("Matched customers", f"{n:,}"),
-        _stat_tile("Rating match rate", f"{rating_match_pct:.1f}%" if rating_match_pct is not None else "—",
-                    "NOVA CLS_GROUP_RATING vs. CLS Obligor Rating"),
-        _stat_tile("Exposure — mean abs diff", f"€{exp_mae:,.0f}" if exp_mae is not None else "—",
-                    "NOVA computed vs. CLS Total Exposure"),
-        _stat_tile("Arrears — mean abs diff", f"€{arr_mae:,.0f}" if arr_mae is not None else "—",
-                    "NOVA computed vs. CLS Total Arrears"),
-    ]
-
-    fig = None
-    if "EXPOSURE_DIFF" in COMPARISON_DF.columns and CLS_COL.get("Total Exposure (incl. Pending Ord) (LTR)"):
-        cls_exp_col = CLS_COL["Total Exposure (incl. Pending Ord) (LTR)"]
-        fig = go.Figure(go.Scatter(
-            x=COMPARISON_DF[cls_exp_col], y=COMPARISON_DF["TOTAL_EXPOSURE"],
-            mode="markers", marker=dict(size=7, color="#3182ce", opacity=0.6),
-            hovertemplate="CLS: €%{x:,.0f}<br>NOVA: €%{y:,.0f}<extra></extra>",
+    sections_html = []
+    for title, fields in VEHICLE_DETAIL_SECTIONS:
+        rows = []
+        for f in fields:
+            if isinstance(f, tuple):
+                # Alternative fields describing the same thing (e.g. MARKET_MODEL vs
+                # VEHICLE_MODEL) — show only the first one that actually has data,
+                # never several possibly-contradictory values for the same label.
+                chosen = next((alt for alt in f if alt in v and _fmt_field_value(alt, v.get(alt)) is not None), None)
+                if chosen is None:
+                    continue
+                label = _field_label(f[0])
+                display = _fmt_field_value(chosen, v.get(chosen))
+            else:
+                if f in consumed_units or f not in v:
+                    continue
+                unit_field = pairing.get(f)
+                unit_val = v.get(unit_field) if unit_field else None
+                display = _fmt_field_value(f, v.get(f), unit_val)
+                if display is None:
+                    continue
+                label = _field_label(f)
+            rows.append(html.Div(
+                [
+                    html.Div(label, style=FIELD_TITLE_STYLE),
+                    html.Div(display, style={"fontSize": "13px", "color": "#1a1a2e", "fontWeight": "600"}),
+                ],
+                style={"minWidth": "190px", "flex": "1 1 190px"},
+            ))
+        if not rows:
+            continue
+        sections_html.append(html.Div(
+            [
+                _panel_title(title),
+                html.Div(rows, style={"display": "flex", "flexWrap": "wrap", "gap": "16px 20px"}),
+            ],
+            style={**CARD_STYLE, "marginBottom": "14px"},
         ))
-        max_v = float(max(COMPARISON_DF[cls_exp_col].max(), COMPARISON_DF["TOTAL_EXPOSURE"].max()) or 1)
-        fig.add_trace(go.Scatter(x=[0, max_v], y=[0, max_v], mode="lines",
-                                  line=dict(color="#a0aec0", width=1, dash="dash"), hoverinfo="skip"))
-        fig.update_layout(
-            height=340, margin=dict(l=50, r=20, t=20, b=40), showlegend=False,
-            plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
-            font=dict(family="Inter, -apple-system, sans-serif", size=12, color="#4a5568"),
-            xaxis=dict(title="CLS Total Exposure (LTR)", gridcolor="#f0f2f5"),
-            yaxis=dict(title="NOVA computed Total Exposure", gridcolor="#f0f2f5"),
-        )
 
-    mismatch_table = html.P("No exposure column found on the CLS side.", style={"color": "#a0aec0"})
-    excluded_note = None
-    if "EXPOSURE_DIFF" in COMPARISON_DF.columns and "BOTH_HAVE_EXPOSURE" in COMPARISON_DF.columns:
-        cls_exp_col = CLS_COL.get("Total Exposure (incl. Pending Ord) (LTR)")
-        # Only rank pairs where BOTH sides actually have a value — a customer
-        # missing CLS exposure isn't a "€X mismatch" against an assumed 0,
-        # it's missing data, and used to swamp this table with false positives.
-        comparable = COMPARISON_DF[COMPARISON_DF["BOTH_HAVE_EXPOSURE"]]
-        n_excluded = len(COMPARISON_DF) - len(comparable)
-        top = comparable.reindex(comparable["EXPOSURE_DIFF"].abs().sort_values(ascending=False).index).head(15)
-        rows = [[
-            r["_ID"], r.get("CLS_GROUP_RATING_DISP") or "NR", r.get("CLS_RATING_DISP") or "NR",
-            f"€{r['TOTAL_EXPOSURE']:,.0f}", f"€{r[cls_exp_col]:,.0f}" if cls_exp_col else "—",
-            f"€{r['EXPOSURE_DIFF']:,.0f}",
-            html.Button("Details", id={"type": "cmp-details", "index": str(r["_ID"])}, n_clicks=0,
-                        className="crcc-details-btn", style=DETAILS_BTN_STYLE),
-        ] for _, r in top.iterrows()]
-        mismatch_table = _table(
-            ["Customer", "NOVA rating", "CLS rating", "NOVA exposure", "CLS exposure", "Diff", ""], rows,
-        ) if rows else html.P("No comparable pair (both sides populated) to rank.", style={"color": "#a0aec0"})
-        if n_excluded:
-            excluded_note = html.Div(
-                f"{n_excluded:,} customer(s) excluded from this ranking — either NOVA or CLS has no exposure "
-                f"value for them (shown as missing, not treated as a 0-vs-real-value mismatch). Click a row's "
-                f"Details to see the raw data on both sides.",
-                style={"fontSize": "11px", "color": "#a0aec0", "marginTop": "8px"},
-            )
+    brand = v.get("BRAND_UPDATE") or ""
+    model = v.get("MARKET_MODEL") or ""
+    headline = f"{brand} {model}".strip() or f"Vehicle {v.get('VEHICLE_ID')}"
 
     return html.Div([
-        html.Div(tiles, style={"display": "grid", "gridTemplateColumns": "repeat(4, 1fr)", "gap": "14px", "marginBottom": "16px"}),
-        html.Div([_panel_title("Exposure — NOVA (computed) vs. CLS (reported)"),
-                  dcc.Graph(figure=fig, config={"displayModeBar": False}) if fig else
-                  html.P("No exposure column found on the CLS side.", style={"color": "#a0aec0"})],
-                 style={**CARD_STYLE, "marginBottom": "16px"}),
-        html.Div([_panel_title("Top 15 exposure mismatches"), mismatch_table, excluded_note], style=CARD_STYLE),
+        html.Div(
+            [
+                html.Div(headline, style={"fontWeight": "700", "fontSize": "19px", "color": "#1a1a2e"}),
+                _status_badge(v.get("NOVA_ASSET_STATUS") or "—"),
+            ],
+            style={"display": "flex", "justifyContent": "space-between", "alignItems": "center",
+                   "marginBottom": "4px"},
+        ),
+        html.Div(f"Vehicle ID {v.get('VEHICLE_ID')}",
+                 style={"fontSize": "12px", "color": "#718096", "marginBottom": "18px"}),
+        html.Div(sections_html),
     ])
 
 
-def _fmt_money_or_dash(v) -> str:
-    return f"€{v:,.0f}" if pd.notna(v) else "—"
+# ── Customer info card ───────────────────────────────────────────────────────
 
-
-def _render_comparison_detail(customer_id: str):
-    """Side-by-side raw data from both datasets for one customer, so a
-    flagged mismatch can actually be diagnosed rather than just observed."""
-    nova_match = NOVA_CUSTOMER_STATE[NOVA_CUSTOMER_STATE["ID_CUSTOMER"] == customer_id]
-    nova_row = nova_match.iloc[0] if not nova_match.empty else None
-
-    cls_row = None
-    cls_exp_col = cls_arr_col = None
-    if CLS_AVAILABLE and CLS_COL.get("Id Customer"):
-        id_c = CLS_COL["Id Customer"]
-        m = CLS_CUSTOMER_STATE[CLS_CUSTOMER_STATE[id_c].astype(str).str.strip() == customer_id]
-        cls_row = m.iloc[0] if not m.empty else None
-        cls_exp_col = CLS_COL.get("Total Exposure (incl. Pending Ord) (LTR)")
-        cls_arr_col = CLS_COL.get("Total Arrears")
-
-    if nova_row is None:
-        nova_panel = html.P("No NOVA data for this customer.", style={"color": "#a0aec0"})
-    else:
-        cob = nova_row.get("COB_DATE")
-        rows = [
-            ["Country", nova_row.get("COUNTRY") or "—"],
-            ["Latest COB Date", cob.strftime("%Y-%m-%d") if pd.notna(cob) else "—"],
-            ["Group Rating", nova_row.get("GROUP_RATING_DISP") or "NR"],
-            ["Counterparty Rating", nova_row.get("COUNTERPARTY_RATING_DISP") or "NR"],
-            ["CLS Rating", nova_row.get("CLS_GROUP_RATING_DISP") or "NR"],
-            ["Vehicles", nova_row.get("N_VEHICLES", 0)],
-            ["Exposure Amount (LTR)", _fmt_money_or_dash(nova_row.get("EXPOSURE_AMOUNT_LTR"))],
-            ["Pending Orders", _fmt_money_or_dash(nova_row.get("PENDING_ORDERS"))],
-            ["Total Exposure (computed)", _fmt_money_or_dash(nova_row.get("TOTAL_EXPOSURE"))],
-            ["Total Arrears (computed)", _fmt_money_or_dash(nova_row.get("TOTAL_ARREARS"))
-                if ARRS_COLUMNS_PRESENT else "not available in this NOVA export"],
-        ]
-        nova_panel = _table(["Field", "Value"], rows)
-
-    if cls_row is None:
-        cls_panel = html.P("No CLS data for this customer.", style={"color": "#a0aec0"})
-    else:
-        def g(label):
-            c = CLS_COL.get(label)
-            return cls_row.get(c) if c else None
-
-        rating_date = g("Obligor Rating Date (CLS)")
-        period_end = g("Period End")
-        rows = [
-            ["Country", g("Code Country") or "—"],
-            ["Period End", period_end.strftime("%Y-%m-%d") if pd.notna(period_end) else "—"],
-            ["Obligor Rating", _fmt_rating("CLS_GROUP_RATING", g("Obligor Rating (CLS)")) or "NR"],
-            ["Rating Date", rating_date.strftime("%Y-%m-%d") if pd.notna(rating_date) else "—"],
-            ["Exposure Amount (LTR)", _fmt_money_or_dash(g("Exposure Amount (LTR)"))],
-            ["Pending Orders Amount", _fmt_money_or_dash(g("Pending Orders Amount"))],
-            ["Total Exposure (reported)", _fmt_money_or_dash(g("Total Exposure (incl. Pending Ord) (LTR)"))],
-            ["Total Arrears (reported)", _fmt_money_or_dash(g("Total Arrears"))],
-            ["Event Of Default", "Yes" if _as_bool_flag(pd.Series([g("Event Of Default")])).iloc[0] else "No"],
-            ["Credit Watch", "Yes" if _as_bool_flag(pd.Series([g("Credit Watch Indicator (CLS)")])).iloc[0] else "No"],
-            ["Credit Limit (LTR)", _fmt_money_or_dash(g("Limit Value Amount (LTR)"))],
-            ["Litigation Status", g("Litigation Status") or "—"],
-        ]
-        cls_panel = _table(["Field", "Value"], rows)
-
-    diag = []
-    if nova_row is not None and cls_row is not None:
-        nova_exp, cls_exp = nova_row.get("TOTAL_EXPOSURE"), (cls_row.get(cls_exp_col) if cls_exp_col else None)
-        if pd.notna(nova_exp) and pd.notna(cls_exp):
-            d = nova_exp - cls_exp
-            pct = f" ({100 * d / cls_exp:+.1f}% vs CLS)" if cls_exp else ""
-            diag.append(f"Exposure diff: €{d:,.0f}{pct}")
-        elif pd.isna(cls_exp):
-            diag.append("CLS has no exposure value for this customer.")
-        elif pd.isna(nova_exp):
-            diag.append("NOVA has no computed exposure for this customer.")
-
-        nova_arr = nova_row.get("TOTAL_ARREARS") if ARRS_COLUMNS_PRESENT else None
-        cls_arr = cls_row.get(cls_arr_col) if cls_arr_col else None
-        if pd.notna(nova_arr) and pd.notna(cls_arr):
-            diag.append(f"Arrears diff: €{nova_arr - cls_arr:,.0f}")
-
-    return html.Div([
-        html.Div(customer_id, style={"fontWeight": "700", "fontSize": "18px", "color": "#1a1a2e", "marginBottom": "4px"}),
-        html.Div(" · ".join(diag) or "Not enough data on both sides to compute a diagnosis.",
-                 style={"fontSize": "12px", "color": "#718096", "marginBottom": "16px"}),
-        html.Div([
-            html.Div([_panel_title("NOVA"), nova_panel], style={**CARD_STYLE, "flex": "1", "minWidth": "0"}),
-            html.Div([_panel_title("CLS"), cls_panel], style={**CARD_STYLE, "flex": "1", "minWidth": "0"}),
-        ], style={"display": "flex", "gap": "16px", "alignItems": "flex-start"}),
-    ])
-
-
-def render_exposure_risk():
-    if NOVA_CUSTOMER_STATE.empty:
-        return html.P("No NOVA customer data available.", style={"color": "#a0aec0"})
-
-    d = NOVA_CUSTOMER_STATE.dropna(subset=["TOTAL_EXPOSURE"]).copy()
-    total_exp = d["TOTAL_EXPOSURE"].sum()
-    top10 = d.sort_values("TOTAL_EXPOSURE", ascending=False).head(10)
-    top10_share = 100 * top10["TOTAL_EXPOSURE"].sum() / total_exp if total_exp else 0
-
-    d["_BAND"] = d["CLS_GROUP_RATING_DISP"].fillna("NR")
-    by_band = d.groupby("_BAND")["TOTAL_EXPOSURE"].sum().sort_index(
-        key=lambda idx: [_rating_sort_key_local(v) for v in idx])
-    fig = go.Figure(go.Bar(x=list(by_band.index), y=list(by_band.values), marker_color="#3182ce"))
-    fig.update_layout(
-        height=320, margin=dict(l=50, r=20, t=20, b=40), showlegend=False,
-        plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
-        font=dict(family="Inter, -apple-system, sans-serif", size=12, color="#4a5568"),
-        xaxis=dict(title="CLS Rating band", gridcolor="#f0f2f5"),
-        yaxis=dict(title="Total exposure (€)", gridcolor="#f0f2f5"),
+def _info_row(label, value):
+    return html.Div(
+        [
+            html.Span(label, style={"fontSize": "11px", "color": "#718096", "fontWeight": "600"}),
+            html.Span(value, style={"fontSize": "13px", "color": "#1a1a2e", "fontWeight": "700"}),
+        ],
+        style={"display": "flex", "justifyContent": "space-between", "padding": "6px 0",
+               "borderBottom": "1px solid #f0f2f5"},
     )
 
-    over_limit_block = html.P("CLS data not available for over-limit check.", style={"color": "#a0aec0"})
-    if CLS_AVAILABLE and CLS_COL.get("Exposure Amount (LTR)") and CLS_COL.get("Limit Value Amount (LTR)"):
-        exp_c, limit_c, id_c = CLS_COL["Exposure Amount (LTR)"], CLS_COL["Limit Value Amount (LTR)"], CLS_COL["Id Customer"]
-        over = CLS_CUSTOMER_STATE.dropna(subset=[exp_c, limit_c])
-        over = over[over[exp_c] > over[limit_c]].sort_values(exp_c, ascending=False).head(15)
-        if over.empty:
-            over_limit_block = html.P("No customer currently exceeds their credit limit.", style={"color": "#2f855a", "fontWeight": "600"})
-        else:
-            rows = [[r[id_c], f"€{r[exp_c]:,.0f}", f"€{r[limit_c]:,.0f}", f"€{r[exp_c] - r[limit_c]:,.0f}"]
-                    for _, r in over.iterrows()]
-            over_limit_block = _table(["Customer", "Exposure", "Limit", "Over by"], rows)
 
-    return html.Div([
-        html.Div([
-            _stat_tile("Total NOVA exposure", f"€{total_exp / 1_000_000:,.2f}M"),
-            _stat_tile("Top 10 concentration", f"{top10_share:.1f}%", "share of total exposure held by the 10 largest customers",
-                       accent="#d98943" if top10_share > 30 else "#3182ce"),
-            _stat_tile("Customers with exposure", f"{len(d):,}"),
-        ], style={"display": "grid", "gridTemplateColumns": "repeat(3, 1fr)", "gap": "14px", "marginBottom": "16px"}),
-        html.Div([_panel_title("Exposure by rating band"), dcc.Graph(figure=fig, config={"displayModeBar": False})],
-                 style={**CARD_STYLE, "marginBottom": "16px"}),
-        html.Div([_panel_title("Customers over their credit limit"), over_limit_block], style=CARD_STYLE),
-    ])
+def _render_customer_info(info: dict):
+    if not info:
+        return None
+    exposure_s = f"{format_millions(info.get('exposure') or 0)} million"
+    asof = info.get("asof_date")
+    name = info.get("customer_name")
+    cust_id = info.get("customer_id")
+    return html.Div(
+        [
+            _panel_title("Customer"),
+            # Name in large text when known; falls back to the ID alone (as
+            # before) if CUSTOMER_NAME isn't in this NOVA export yet.
+            html.Div(name or cust_id, style={"fontWeight": "700", "fontSize": "17px",
+                                              "color": "#1a1a2e", "marginBottom": "2px"}),
+            *([html.Div(cust_id, style={"fontSize": "12px", "color": "#718096",
+                                         "fontWeight": "600", "marginBottom": "2px"})]
+              if name else []),
+            html.Div(info.get("industry") or "—", style={"fontSize": "12px", "color": "#718096",
+                                                           "marginBottom": "4px" if asof else "14px"}),
+            *([html.Div(f"Date: {asof}", style={"fontSize": "11px", "color": "#a0aec0",
+                                                  "fontWeight": "600", "marginBottom": "14px"})]
+              if asof else []),
+            _info_row("Country", info.get("country") or "—"),
+            _info_row("Shared Client Flag", info.get("shared_flag") or "—"),
+            _info_row("Number of Vehicles", info.get("n_vehicles", 0)),
 
-
-def render_arrears_onset():
-    if not CLS_AVAILABLE:
-        return _missing_cls_banner()
-    if ARREARS_ONSET_DF.empty:
-        return html.P("No customer currently shows Total Arrears > 0 in CLS.", style={"color": "#2f855a", "fontWeight": "600"})
-
-    n_ever_arrears = len(ARREARS_ONSET_DF)
-    n_defaulted = int(ARREARS_ONSET_DF["DEFAULT_DATE"].notna().sum())
-    default_rate = 100 * n_defaulted / n_ever_arrears if n_ever_arrears else 0
-    lead_times = ARREARS_ONSET_DF["DAYS_TO_DEFAULT"].dropna()
-
-    tiles = [
-        _stat_tile("Customers who ever had arrears", f"{n_ever_arrears:,}"),
-        _stat_tile("...who later defaulted", f"{n_defaulted:,}", f"{default_rate:.1f}% of the above",
-                   accent="#9b2c2c" if n_defaulted else "#2f855a"),
-        _stat_tile("Median lead time to default", f"{lead_times.median():.0f} days" if len(lead_times) else "—",
-                   "from first arrears to Event Of Default"),
-    ]
-
-    fig = None
-    if len(lead_times) > 0:
-        fig = go.Figure(go.Histogram(x=lead_times, marker_color="#3182ce", nbinsx=20))
-        fig.update_layout(
-            height=300, margin=dict(l=50, r=20, t=20, b=40), showlegend=False,
-            plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
-            font=dict(family="Inter, -apple-system, sans-serif", size=12, color="#4a5568"),
-            xaxis=dict(title="Days from first arrears to default", gridcolor="#f0f2f5"),
-            yaxis=dict(title="Customers", gridcolor="#f0f2f5"),
-        )
-
-    fastest = ARREARS_ONSET_DF.dropna(subset=["DAYS_TO_DEFAULT"]).sort_values("DAYS_TO_DEFAULT").head(15)
-    rows = [[r["ID_CUSTOMER"], r["ONSET_DATE"].strftime("%Y-%m-%d"), r["DEFAULT_DATE"].strftime("%Y-%m-%d"),
-             f"{int(r['DAYS_TO_DEFAULT'])} days"] for _, r in fastest.iterrows()]
-    fastest_table = _table(["Customer", "Arrears onset", "Default date", "Lead time"], rows) if rows else \
-        html.P("No customer with both an arrears onset and a default date.", style={"color": "#a0aec0"})
-
-    children = [html.Div(tiles, style={"display": "grid", "gridTemplateColumns": "repeat(3, 1fr)", "gap": "14px", "marginBottom": "16px"})]
-    if fig:
-        children.append(html.Div([_panel_title("Lead time from first arrears to default"),
-                                   dcc.Graph(figure=fig, config={"displayModeBar": False})],
-                                  style={**CARD_STYLE, "marginBottom": "16px"}))
-    children.append(html.Div([_panel_title("Fastest arrears-to-default cases"), fastest_table], style=CARD_STYLE))
-    return html.Div(children)
-
-
-def render_adjusted_exposure():
-    if ADJUSTED_EXPOSURE_DF.empty:
-        return html.P("No NOVA customer data available.", style={"color": "#a0aec0"})
-
-    d = ADJUSTED_EXPOSURE_DF
-    raw_total = d["TOTAL_EXPOSURE"].sum()
-    adj_total = d["ADJUSTED_EXPOSURE"].sum()
-    uplift_pct = 100 * (adj_total - raw_total) / raw_total if raw_total else 0
-    # NaN uplift (0 raw exposure, but arrears now add real exposure) counts as
-    # material too — it's the most dramatic case, not a non-event.
-    n_material = int(((d["UPLIFT_PCT"] > 5) | (d["UPLIFT_PCT"].isna() & (d["ARREARS_USED"] > 0))).sum())
-
-    tiles = [
-        _stat_tile("Raw exposure", f"€{raw_total / 1_000_000:,.2f}M", "LTR + pending only"),
-        _stat_tile("Adjusted exposure", f"€{adj_total / 1_000_000:,.2f}M", "raw + arrears",
-                    accent="#d98943" if uplift_pct > 0 else "#3182ce"),
-        _stat_tile("Portfolio uplift", f"{uplift_pct:+.2f}%", "adjusted vs. raw, whole portfolio"),
-        _stat_tile("Customers with >5% uplift", f"{n_material:,}", "arrears meaningfully change their risk picture"),
-    ]
-
-    d = d.copy()
-    d["_BAND"] = d["CLS_GROUP_RATING_DISP"].fillna("NR")
-    by_band = d.groupby("_BAND")[["TOTAL_EXPOSURE", "ADJUSTED_EXPOSURE"]].sum()
-    by_band = by_band.reindex(sorted(by_band.index, key=_rating_sort_key_local))
-    fig = go.Figure([
-        go.Bar(name="Raw", x=list(by_band.index), y=list(by_band["TOTAL_EXPOSURE"]), marker_color="#a0aec0"),
-        go.Bar(name="Adjusted", x=list(by_band.index), y=list(by_band["ADJUSTED_EXPOSURE"]), marker_color="#3182ce"),
-    ])
-    fig.update_layout(
-        height=340, margin=dict(l=50, r=20, t=20, b=40), barmode="group",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
-        font=dict(family="Inter, -apple-system, sans-serif", size=12, color="#4a5568"),
-        xaxis=dict(title="CLS Rating band", gridcolor="#f0f2f5"),
-        yaxis=dict(title="Exposure (€)", gridcolor="#f0f2f5"),
+            html.Div("Credit", style={**PANEL_TITLE_STYLE, "marginTop": "18px"}),
+            _info_row("Group Rating", _rating_display(info.get("group_rating"))),
+            _info_row("Counterparty Rating", _rating_display(info.get("counterparty_rating"))),
+            _info_row("CLS Rating", _rating_display(info.get("cls_rating"))),
+            _info_row("Total Exposure", exposure_s),
+        ],
+        style=CUSTOMER_CARD_STYLE,
     )
 
-    # NaN (0 -> something) sorts as "worse than any finite %", so it leads the table
-    # instead of dropping to the bottom under pandas' default NaN-last sort.
-    top_uplift = d[d["ARREARS_USED"] > 0].copy()
-    top_uplift["_SORT_KEY"] = top_uplift["UPLIFT_PCT"].fillna(np.inf)
-    top_uplift = top_uplift.sort_values("_SORT_KEY", ascending=False).head(15)
-    rows = [[
-        r["ID_CUSTOMER"], r.get("CLS_GROUP_RATING_DISP") or "NR",
-        f"€{r['TOTAL_EXPOSURE']:,.0f}", f"€{r['ARREARS_USED']:,.0f}",
-        f"€{r['ADJUSTED_EXPOSURE']:,.0f}", f"{r['UPLIFT_PCT']:+.1f}%" if pd.notna(r["UPLIFT_PCT"]) else "New",
-    ] for _, r in top_uplift.iterrows()]
-    top_table = _table(["Customer", "Rating", "Raw exposure", "Arrears added", "Adjusted exposure", "Uplift"], rows) \
-        if rows else html.P("No customer currently has arrears folded into their exposure.", style={"color": "#2f855a", "fontWeight": "600"})
 
-    return html.Div([
-        html.Div([
-            html.Div("Methodology", style={"fontWeight": "700", "fontSize": "13px", "color": "#1a1a2e", "marginBottom": "4px"}),
-            html.Div("Adjusted Exposure = Total Exposure (EXPOSURE_AMOUNT_LTR + PENDING_ORDERS, dedup per "
-                     "contract) + Arrears. Money that's overdue but unpaid is still money at risk on top of "
-                     "what's already outstanding — this is closer to how exposure is actually sized at larger "
-                     "financial institutions than the raw contracted amount alone. Every figure here is anchored "
-                     "to each customer's own latest NOVA COB_DATE, never a CLS reporting date.",
-                     style={"fontSize": "12px", "color": "#718096", "lineHeight": "1.5", "marginBottom": "8px"}),
-            html.Div(f"Arrears source used: {ADJUSTED_EXPOSURE_ARREARS_SOURCE}.",
-                     style={"fontSize": "11px", "color": "#3182ce", "fontWeight": "600"}),
-        ], style={**CARD_STYLE, "marginBottom": "16px"}),
-        html.Div(tiles, style={"display": "grid", "gridTemplateColumns": "repeat(4, 1fr)", "gap": "14px", "marginBottom": "16px"}),
-        html.Div([_panel_title("Exposure by rating band — raw vs. adjusted"),
-                  dcc.Graph(figure=fig, config={"displayModeBar": False})],
-                 style={**CARD_STYLE, "marginBottom": "16px"}),
-        html.Div([_panel_title("Top 15 customers by uplift"), top_table], style=CARD_STYLE),
-    ])
-
-
-# =============================================================================
-# Country comparison — NOVA vs. CLS side by side, independently aggregated
-# and filtered (country, rating band). Unlike the "NOVA ↔ CLS Comparison" tab
-# this never needs customer-level ID matching between the two systems, so it
-# stays useful even when that join finds nothing.
-# =============================================================================
-
-def _country_options() -> list[str]:
-    countries = set()
-    if not NOVA_CUSTOMER_STATE.empty and "COUNTRY" in NOVA_CUSTOMER_STATE.columns:
-        countries |= set(NOVA_CUSTOMER_STATE["COUNTRY"].dropna().unique())
-    if not CLS_ADJUSTED_DF.empty and "COUNTRY" in CLS_ADJUSTED_DF.columns:
-        countries |= set(CLS_ADJUSTED_DF["COUNTRY"].dropna().unique())
-    return sorted(countries)
-
-
-def _rating_band_options() -> list[str]:
-    vals = set()
-    if not ADJUSTED_EXPOSURE_DF.empty and "CLS_GROUP_RATING_DISP" in ADJUSTED_EXPOSURE_DF.columns:
-        vals |= set(ADJUSTED_EXPOSURE_DF["CLS_GROUP_RATING_DISP"].dropna().unique())
-    if not CLS_ADJUSTED_DF.empty and "RATING_DISP" in CLS_ADJUSTED_DF.columns:
-        vals |= set(CLS_ADJUSTED_DF["RATING_DISP"].dropna().unique())
-    return sorted(vals, key=_rating_sort_key_local)
-
-
-def render_country_comparison():
-    if not CLS_AVAILABLE:
-        return _missing_cls_banner()
-    return html.Div([
-        html.Div([
-            html.Div([
-                html.Div("Country", style=FIELD_TITLE_STYLE),
-                dcc.Dropdown(id="cc-filter-country",
-                             options=[{"label": c, "value": c} for c in _country_options()],
-                             multi=True, placeholder="All countries", style={"minWidth": "220px"}),
-            ], style={"flex": "1"}),
-            html.Div([
-                html.Div("CLS Rating band", style=FIELD_TITLE_STYLE),
-                dcc.Dropdown(id="cc-filter-rating",
-                             options=[{"label": v, "value": v} for v in _rating_band_options()],
-                             multi=True, placeholder="All rating bands", style={"minWidth": "220px"}),
-            ], style={"flex": "1"}),
-        ], style={"display": "flex", "gap": "14px", "marginBottom": "8px"}),
-        html.Div("Each side's totals are computed independently on its own dataset, then filtered the same "
-                 "way — no customer-level ID matching required (unlike the NOVA ↔ CLS Comparison tab), so "
-                 "this stays useful even if that join finds nothing.",
-                 style={"fontSize": "11px", "color": "#a0aec0", "marginBottom": "16px"}),
-        html.Div(id="cc-content"),
-    ])
-
-
-def _country_comparison_bar(nova_by_country: pd.Series, cls_by_country: pd.Series, y_title: str):
-    countries = sorted(set(nova_by_country.index) | set(cls_by_country.index))
-    fig = go.Figure([
-        go.Bar(name="NOVA", x=countries, y=[nova_by_country.get(c, 0) for c in countries], marker_color="#3182ce"),
-        go.Bar(name="CLS", x=countries, y=[cls_by_country.get(c, 0) for c in countries], marker_color="#a0aec0"),
-    ])
-    fig.update_layout(
-        height=320, margin=dict(l=50, r=20, t=20, b=40), barmode="group",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
-        font=dict(family="Inter, -apple-system, sans-serif", size=12, color="#4a5568"),
-        xaxis=dict(title="Country", gridcolor="#f0f2f5"),
-        yaxis=dict(title=y_title, gridcolor="#f0f2f5"),
-    )
-    return fig
-
-
-def build_country_comparison_content(countries: list[str] | None, ratings: list[str] | None):
-    if not CLS_AVAILABLE:
-        return _missing_cls_banner()
-
-    nova_d = ADJUSTED_EXPOSURE_DF
-    cls_d = CLS_ADJUSTED_DF
-    if countries:
-        nova_d = nova_d[nova_d["COUNTRY"].isin(countries)]
-        cls_d = cls_d[cls_d["COUNTRY"].isin(countries)]
-    if ratings:
-        nova_d = nova_d[nova_d["CLS_GROUP_RATING_DISP"].isin(ratings)]
-        cls_d = cls_d[cls_d["RATING_DISP"].isin(ratings)]
-
-    nova_raw, cls_raw = nova_d["TOTAL_EXPOSURE"].sum(), cls_d["RAW_EXPOSURE"].sum()
-    nova_adj, cls_adj = nova_d["ADJUSTED_EXPOSURE"].sum(), cls_d["ADJUSTED_EXPOSURE"].sum()
-    raw_diff_pct = 100 * (nova_raw - cls_raw) / cls_raw if cls_raw else None
-    adj_diff_pct = 100 * (nova_adj - cls_adj) / cls_adj if cls_adj else None
-
-    tiles = [
-        _stat_tile("NOVA raw exposure", f"€{nova_raw / 1_000_000:,.2f}M"),
-        _stat_tile("CLS raw exposure", f"€{cls_raw / 1_000_000:,.2f}M",
-                    f"NOVA is {raw_diff_pct:+.1f}% vs CLS" if raw_diff_pct is not None else None),
-        _stat_tile("NOVA adjusted exposure", f"€{nova_adj / 1_000_000:,.2f}M", "raw + arrears", accent="#d98943"),
-        _stat_tile("CLS adjusted exposure", f"€{cls_adj / 1_000_000:,.2f}M",
-                    f"NOVA is {adj_diff_pct:+.1f}% vs CLS" if adj_diff_pct is not None else None, accent="#d98943"),
-    ]
-
-    nova_raw_by_country = nova_d.groupby("COUNTRY")["TOTAL_EXPOSURE"].sum()
-    cls_raw_by_country = cls_d.groupby("COUNTRY")["RAW_EXPOSURE"].sum()
-    nova_adj_by_country = nova_d.groupby("COUNTRY")["ADJUSTED_EXPOSURE"].sum()
-    cls_adj_by_country = cls_d.groupby("COUNTRY")["ADJUSTED_EXPOSURE"].sum()
-
-    raw_fig = _country_comparison_bar(nova_raw_by_country, cls_raw_by_country, "Raw exposure (€)")
-    adj_fig = _country_comparison_bar(nova_adj_by_country, cls_adj_by_country, "Adjusted exposure (€)")
-
-    all_countries = sorted(set(nova_raw_by_country.index) | set(cls_raw_by_country.index))
-    rows = []
-    for c in all_countries:
-        nr, cr = nova_raw_by_country.get(c, 0), cls_raw_by_country.get(c, 0)
-        na, ca = nova_adj_by_country.get(c, 0), cls_adj_by_country.get(c, 0)
-        rows.append([
-            c, f"€{nr:,.0f}", f"€{cr:,.0f}", f"€{nr - cr:,.0f}",
-            f"€{na:,.0f}", f"€{ca:,.0f}", f"€{na - ca:,.0f}",
-        ])
-    table = _table(["Country", "NOVA raw", "CLS raw", "Raw diff",
-                     "NOVA adjusted", "CLS adjusted", "Adjusted diff"], rows) if rows else \
-        html.P("No data for this filter combination.", style={"color": "#a0aec0"})
-
-    return html.Div([
-        html.Div(tiles, style={"display": "grid", "gridTemplateColumns": "repeat(4, 1fr)", "gap": "14px", "marginBottom": "16px"}),
-        html.Div([_panel_title("Raw exposure by country — NOVA vs. CLS"),
-                  dcc.Graph(figure=raw_fig, config={"displayModeBar": False})],
-                 style={**CARD_STYLE, "marginBottom": "16px"}),
-        html.Div([_panel_title("Adjusted exposure by country — NOVA vs. CLS"),
-                  dcc.Graph(figure=adj_fig, config={"displayModeBar": False})],
-                 style={**CARD_STYLE, "marginBottom": "16px"}),
-        html.Div([_panel_title("Country breakdown"), table], style=CARD_STYLE),
-    ])
-
-
-def _rating_sort_key_local(disp: str):
-    if disp == "NR":
-        return (-1, 0)
-    try:
-        return (0, float(disp))
-    except (TypeError, ValueError):
-        s, suffix = disp, 0
-        if s.endswith("+"):
-            suffix, s = 1, s[:-1]
-        elif s.endswith("-"):
-            suffix, s = -1, s[:-1]
-        try:
-            return (0, int(s), suffix)
-        except ValueError:
-            return (0, 999, 0)
-
-
-TABS = [
-    ("overview", "Overview", render_overview),
-    ("quality", "Data Quality", render_data_quality),
-    ("comparison", "NOVA ↔ CLS Comparison", render_comparison),
-    ("country", "Country Comparison", render_country_comparison),
-    ("adjusted", "Adjusted Exposure", render_adjusted_exposure),
-    ("exposure", "Exposure Risk", render_exposure_risk),
-    ("onset", "Arrears Onset", render_arrears_onset),
-]
+# ── Layout ───────────────────────────────────────────────────────────────────
 
 app.layout = html.Div(
     [
+        dcc.Store(id="customer-info-store", data=None),
+        dcc.Store(id="customer-vehicles-store", data=[]),
+        dcc.Store(id="grid-page-store", data=0),
+
         html.Div(
             [
-                html.H1("Credit Risk Control Center", style={"margin": "0 0 4px", "fontSize": "22px",
-                                                               "fontWeight": "700", "color": "#1a1a2e"}),
-                html.Div("NOVA fleet data cross-checked against the CLS obligor extract — data quality, "
-                         "exposure risk, and arrears-to-default analysis.",
-                         style={"fontSize": "12px", "color": "#718096"}),
+                html.H1("Customer & Vehicle Explorer",
+                        style={"margin": "0 0 14px", "fontSize": "22px", "fontWeight": "700",
+                               "color": "#1a1a2e"}),
+                html.Div(
+                    [
+                        dcc.Dropdown(
+                            id="filter-country", options=COUNTRY_FILTER_OPTIONS,
+                            placeholder="All countries", clearable=True,
+                            style={"minWidth": "180px"},
+                        ),
+                        dcc.Dropdown(
+                            id="customer-id-input", options=[], placeholder="Search a Customer ID…",
+                            searchable=True, clearable=True,
+                            style={"flex": "1", "maxWidth": "360px", "fontSize": "13px"},
+                        ),
+                        dcc.Dropdown(
+                            id="asof-date-input", options=ASOF_DATE_OPTIONS,
+                            placeholder="Date", clearable=True,
+                            style={"minWidth": "170px"},
+                        ),
+                        html.Button("Search", id="btn-search", n_clicks=0, style=PRIMARY_BTN_STYLE),
+                    ],
+                    style={"display": "flex", "gap": "10px", "alignItems": "center"},
+                ),
+                html.Div(id="search-error", style=ERROR_STYLE),
             ],
             style={"padding": "20px 28px", "borderBottom": "1px solid #e2e8f0", "background": "#ffffff"},
         ),
-        dcc.Tabs(id="crcc-tabs", value="overview",
-                  children=[dcc.Tab(label=label, value=key) for key, label, _ in TABS],
-                  style={"padding": "0 28px"}),
-        html.Div(id="crcc-tab-content", style={"padding": "24px 28px"}),
 
         html.Div(
-            id="crcc-modal",
+            "Enter a Customer ID above and press Search to see their fleet.",
+            id="empty-state",
+            style={"padding": "80px 20px", "textAlign": "center", "color": "#a0aec0",
+                   "fontSize": "14px"},
+        ),
+
+        html.Div(
+            [
+                html.Div(
+                    [
+                        html.Div(
+                            [
+                                _panel_title("Filters"),
+                                html.Div(
+                                    [
+                                        html.Div(
+                                            [
+                                                html.Div("Brand", style=FIELD_TITLE_STYLE),
+                                                dcc.Dropdown(id="filter-brand", options=[], multi=True,
+                                                             placeholder="All brands",
+                                                             style={"minWidth": "180px"}),
+                                            ],
+                                            style={"flex": "1"},
+                                        ),
+                                        html.Div(
+                                            [
+                                                html.Div("Body Type", style=FIELD_TITLE_STYLE),
+                                                dcc.Dropdown(id="filter-bodytype", options=[], multi=True,
+                                                             placeholder="All body types",
+                                                             style={"minWidth": "180px"}),
+                                            ],
+                                            style={"flex": "1"},
+                                        ),
+                                        html.Div(
+                                            [
+                                                html.Div("Asset Status", style=FIELD_TITLE_STYLE),
+                                                dcc.Dropdown(id="filter-status", options=[], multi=True,
+                                                             placeholder="All statuses",
+                                                             style={"minWidth": "180px"}),
+                                            ],
+                                            style={"flex": "1"},
+                                        ),
+                                        html.Div(
+                                            [
+                                                html.Div("Sort by Delivery Date", style=FIELD_TITLE_STYLE),
+                                                dcc.Dropdown(
+                                                    id="sort-direction",
+                                                    options=[
+                                                        {"label": "Newest first", "value": "desc"},
+                                                        {"label": "Oldest first", "value": "asc"},
+                                                    ],
+                                                    value="desc", clearable=False,
+                                                    style={"minWidth": "160px"},
+                                                ),
+                                            ],
+                                            style={"flex": "1"},
+                                        ),
+                                    ],
+                                    style={"display": "flex", "gap": "14px", "flexWrap": "wrap"},
+                                ),
+                                html.Div(
+                                    html.Button("Refresh", id="btn-refresh-filters", n_clicks=0,
+                                                className="cve-secondary-btn", style=SECONDARY_BTN_STYLE),
+                                    style={"display": "flex", "justifyContent": "flex-end", "marginTop": "12px"},
+                                ),
+                            ],
+                            style={**CARD_STYLE, "marginBottom": "16px"},
+                        ),
+                        html.Div(
+                            id="vehicle-grid",
+                            style={"display": "grid",
+                                   "gridTemplateColumns": "repeat(auto-fill, minmax(260px, 1fr))",
+                                   "gap": "14px"},
+                        ),
+                        html.Div(
+                            [
+                                html.Button("←", id="btn-page-prev", n_clicks=0,
+                                            className="page-nav-button"),
+                                html.Span("Page 1 of 1", id="grid-page-label",
+                                          style={"fontSize": "12px", "color": "#718096", "fontWeight": "600"}),
+                                html.Button("→", id="btn-page-next", n_clicks=0,
+                                            className="page-nav-button"),
+                            ],
+                            style={"display": "flex", "justifyContent": "center", "alignItems": "center",
+                                   "gap": "14px", "marginTop": "18px"},
+                        ),
+                    ],
+                    style={"flex": "1", "minWidth": "0"},
+                ),
+                html.Div(id="customer-info-card", style={"width": "300px", "minWidth": "300px"}),
+            ],
+            id="results-section",
+            style={"display": "none", "gap": "20px", "alignItems": "flex-start",
+                   "padding": "24px 28px"},
+        ),
+
+        html.Div(
+            id="vehicle-modal",
             style=MODAL_OVERLAY_STYLE,
             children=[
                 html.Div(
-                    style=MODAL_PANEL_STYLE,
+                    style=VEHICLE_MODAL_PANEL_STYLE,
                     children=[
                         html.Div(
-                            html.Button("Close", id="crcc-modal-close", n_clicks=0,
-                                        className="crcc-secondary-btn", style=SECONDARY_BTN_STYLE),
+                            html.Button("Close", id="vehicle-modal-close", n_clicks=0,
+                                        className="cve-secondary-btn", style=SECONDARY_BTN_STYLE),
                             style={"display": "flex", "justifyContent": "flex-end", "marginBottom": "12px"},
                         ),
-                        html.Div(id="crcc-modal-body"),
+                        html.Div(id="vehicle-modal-body"),
                     ],
                 ),
             ],
@@ -1357,34 +897,225 @@ app.layout = html.Div(
 )
 
 
-@app.callback(Output("crcc-tab-content", "children"), Input("crcc-tabs", "value"))
-def _render_tab(tab_value):
-    for key, _, renderer in TABS:
-        if key == tab_value:
-            return renderer()
-    return html.P("Unknown tab.")
+# =============================================================================
+# Callbacks
+# =============================================================================
+
+_CUSTOMER_OPTIONS_CAP = 200  # cap the list shown before the user types anything, so the
+                             # dropdown doesn't try to render every customer at once
 
 
 @app.callback(
-    Output("cc-content", "children"),
-    Input("cc-filter-country", "value"),
-    Input("cc-filter-rating", "value"),
+    Output("customer-id-input", "options"),
+    Input("customer-id-input", "search_value"),
+    Input("filter-country", "value"),
+    State("customer-id-input", "value"),
 )
-def _update_country_comparison(countries, ratings):
-    return build_country_comparison_content(countries, ratings)
+def _update_customer_options(search_value, country, current_value):
+    d = CUSTOMER_INDEX_DF
+    if country and "COUNTRY" in d.columns:
+        d = d[d["COUNTRY"] == country]
+    if search_value:
+        d = d[d["ID_CUSTOMER"].str.upper().str.contains(search_value.strip().upper(), na=False, regex=False)]
+    else:
+        d = d.head(_CUSTOMER_OPTIONS_CAP)
+
+    has_name = "CUSTOMER_NAME" in d.columns
+    rows = list(d[["ID_CUSTOMER", "CUSTOMER_NAME"]].itertuples(index=False)) if has_name else \
+        [(cid, None) for cid in d["ID_CUSTOMER"]]
+    ids = [r[0] for r in rows]
+    if current_value and current_value not in ids:
+        extra_name = None
+        if has_name:
+            match = CUSTOMER_INDEX_DF[CUSTOMER_INDEX_DF["ID_CUSTOMER"] == current_value]
+            extra_name = match["CUSTOMER_NAME"].iloc[0] if not match.empty else None
+        rows = [(current_value, extra_name)] + rows
+
+    return [{"label": f"{cid} — {name}" if pd.notna(name) and name else cid, "value": cid} for cid, name in rows]
 
 
 @app.callback(
-    Output("crcc-modal", "style"),
-    Output("crcc-modal-body", "children"),
-    Input({"type": "cmp-details", "index": ALL}, "n_clicks"),
-    Input("crcc-modal-close", "n_clicks"),
+    Output("customer-info-store", "data"),
+    Output("customer-vehicles-store", "data"),
+    Output("search-error", "children"),
+    Output("search-error", "style"),
+    Output("results-section", "style"),
+    Output("empty-state", "style"),
+    Input("btn-search", "n_clicks"),
+    State("customer-id-input", "value"),
+    State("asof-date-input", "value"),
     prevent_initial_call=True,
 )
-def _toggle_comparison_modal(card_clicks, _close_clicks):
+def _search_customer(_n_clicks, cust_id, asof_date):
+    cust_id = (cust_id or "").strip()
+    if not cust_id:
+        return (no_update, no_update, "Please enter a Customer ID.",
+                {**ERROR_STYLE, "display": "block"}, {"display": "none"}, {"display": "block"})
+
+    mask = pd.Series(False, index=CV_DF.index)
+    if "ID_CUSTOMER" in CV_DF.columns:
+        mask = mask | (CV_DF["ID_CUSTOMER"].astype(str).str.strip().str.upper() == cust_id.upper())
+    if "OBLIGOR_IDENTIFIER" in CV_DF.columns:
+        mask = mask | (CV_DF["OBLIGOR_IDENTIFIER"].astype(str).str.strip().str.upper() == cust_id.upper())
+    customer_rows = CV_DF[mask]
+
+    # "As of" a COB Date: a vehicle is only ever IN FLEET / SOLD / ... as of a
+    # specific snapshot, so restrict to snapshots at or before the chosen date
+    # before anything downstream (profile/exposure/vehicle list) picks the
+    # "latest" row per contract — that then naturally becomes "latest as of
+    # that date", and contracts that only appear later correctly drop out.
+    asof_ts = None
+    if asof_date and "COB_DATE" in customer_rows.columns:
+        asof_ts = pd.to_datetime(asof_date)
+        customer_rows = customer_rows[customer_rows["COB_DATE"] <= asof_ts]
+
+    if customer_rows.empty:
+        suffix = f" as of {asof_ts.date()}" if asof_ts is not None else ""
+        return (None, [], f'No customer found for ID "{cust_id}"{suffix}.',
+                {**ERROR_STYLE, "display": "block"}, {"display": "none"}, {"display": "block"})
+
+    profile = _customer_profile(customer_rows)
+    exposure = _customer_exposure(customer_rows)
+
+    keys = [k for k in UNIQUE_KEY_COLS if k in customer_rows.columns]
+    veh = customer_rows.sort_values("COB_DATE") if "COB_DATE" in customer_rows.columns else customer_rows
+    if keys:
+        veh = veh.drop_duplicates(subset=keys, keep="last")
+
+    info = _json_safe_dict({
+        "customer_id": cust_id,
+        "customer_name": profile.get("CUSTOMER_NAME"),
+        "country": profile.get("COUNTRY"),
+        "industry": profile.get("ARVAL_INDUSTRY_CODE_CLS_DESCRIPTION"),
+        "shared_flag": profile.get("SHARED_CLIENT_FLAG"),
+        "group_rating": profile.get("GROUP_RATING"),
+        "counterparty_rating": profile.get("COUNTERPARTY_RATING"),
+        "cls_rating": profile.get("CLS_GROUP_RATING"),
+        "exposure": exposure,
+        "n_vehicles": int(len(veh)),
+        "asof_date": asof_ts.strftime("%Y-%m-%d") if asof_ts is not None else None,
+    })
+    vehicles = _json_safe_records(veh)
+
+    return (info, vehicles, "", {**ERROR_STYLE, "display": "none"},
+            {"display": "flex", "gap": "20px", "alignItems": "flex-start", "padding": "24px 28px"},
+            {"display": "none"})
+
+
+@app.callback(
+    Output("customer-info-card", "children"),
+    Input("customer-info-store", "data"),
+)
+def _update_customer_card(info):
+    return _render_customer_info(info)
+
+
+GRID_PAGE_SIZE = 20
+
+
+@app.callback(
+    Output("vehicle-grid", "children"),
+    Output("filter-brand", "options"),
+    Output("filter-bodytype", "options"),
+    Output("filter-status", "options"),
+    Output("filter-brand", "value"),
+    Output("filter-bodytype", "value"),
+    Output("filter-status", "value"),
+    Output("grid-page-store", "data"),
+    Output("grid-page-label", "children"),
+    Output("btn-page-prev", "disabled"),
+    Output("btn-page-next", "disabled"),
+    Input("customer-vehicles-store", "data"),
+    Input("btn-refresh-filters", "n_clicks"),
+    Input("btn-page-prev", "n_clicks"),
+    Input("btn-page-next", "n_clicks"),
+    State("filter-brand", "value"),
+    State("filter-bodytype", "value"),
+    State("filter-status", "value"),
+    State("sort-direction", "value"),
+    State("grid-page-store", "data"),
+)
+def _render_grid(vehicles, _refresh_clicks, _prev_clicks, _next_clicks,
+                  brands_f, bodytypes_f, statuses_f, sort_dir, page):
+    # Filters/sort only ever apply on an explicit click (Refresh, or Prev/Next
+    # while paging) — never live while a dropdown value is merely being
+    # changed, per the user's request. A fresh customer search always resets
+    # the filter selections and goes back to page 1.
+    trig = callback_context.triggered[0]["prop_id"].split(".")[0] if callback_context.triggered else None
+    is_new_list = trig in (None, "customer-vehicles-store")
+    if is_new_list:
+        brands_f, bodytypes_f, statuses_f = None, None, None
+    brand_val = None if is_new_list else brands_f
+    bt_val = None if is_new_list else bodytypes_f
+    status_val = None if is_new_list else statuses_f
+
+    vehicles = vehicles or []
+    if not vehicles:
+        return (html.P("No vehicles for this customer.", style={"color": "#a0aec0", "fontSize": "13px"}),
+                [], [], [], brand_val, bt_val, status_val, 0, "Page 0 of 0", True, True)
+
+    df = pd.DataFrame(vehicles)
+
+    brand_opts = ([{"label": b, "value": b} for b in sorted(df["BRAND_UPDATE"].dropna().unique())]
+                  if "BRAND_UPDATE" in df.columns else [])
+    bt_col = "MARKET_BODY_GROUP" if "MARKET_BODY_GROUP" in df.columns else (
+        "VEHICLE_BODY_TYPE" if "VEHICLE_BODY_TYPE" in df.columns else None)
+    bt_opts = ([{"label": b, "value": b} for b in sorted(df[bt_col].dropna().unique())]
+               if bt_col else [])
+    status_opts = ([{"label": s, "value": s} for s in sorted(df["NOVA_ASSET_STATUS"].dropna().unique())]
+                   if "NOVA_ASSET_STATUS" in df.columns else [])
+
+    d = df
+    if brands_f and "BRAND_UPDATE" in d.columns:
+        d = d[d["BRAND_UPDATE"].isin(brands_f)]
+    if bodytypes_f and bt_col:
+        d = d[d[bt_col].isin(bodytypes_f)]
+    if statuses_f and "NOVA_ASSET_STATUS" in d.columns:
+        d = d[d["NOVA_ASSET_STATUS"].isin(statuses_f)]
+
+    if "DELIVERY_DATE" in d.columns:
+        d = d.copy()
+        d["_delivery_sort"] = pd.to_datetime(d["DELIVERY_DATE"], errors="coerce")
+        d = d.sort_values("_delivery_sort", ascending=(sort_dir == "asc"), na_position="last")
+
+    n = len(d)
+    total_pages = max(1, -(-n // GRID_PAGE_SIZE))  # ceil division, no extra import
+    if trig == "btn-page-prev":
+        page = max(0, (page or 0) - 1)
+    elif trig == "btn-page-next":
+        page = min(total_pages - 1, (page or 0) + 1)
+    else:
+        page = 0
+    page = max(0, min(page, total_pages - 1))
+
+    if d.empty:
+        return (html.P("No vehicles match these filters.", style={"color": "#a0aec0", "fontSize": "13px"}),
+                brand_opts, bt_opts, status_opts, brand_val, bt_val, status_val, 0, "Page 0 of 0", True, True)
+
+    start = page * GRID_PAGE_SIZE
+    page_d = d.iloc[start:start + GRID_PAGE_SIZE]
+    # Re-sanitize: rebuilding a DataFrame from the store's records and calling
+    # .to_dict() again turns None back into NaN for numeric-ish columns, and
+    # NaN is truthy in Python — an unguarded `v.get(...) or "—"` fallback
+    # would then render the literal string "nan" instead of falling back.
+    cards = [_vehicle_card(_json_safe_dict(row)) for row in page_d.to_dict("records")]
+    label = f"Page {page + 1} of {total_pages} ({n} vehicle{'s' if n != 1 else ''})"
+    return (cards, brand_opts, bt_opts, status_opts, brand_val, bt_val, status_val,
+            page, label, page <= 0, page >= total_pages - 1)
+
+
+@app.callback(
+    Output("vehicle-modal", "style"),
+    Output("vehicle-modal-body", "children"),
+    Input({"type": "vehicle-more-details", "index": ALL}, "n_clicks"),
+    Input("vehicle-modal-close", "n_clicks"),
+    State("customer-vehicles-store", "data"),
+    prevent_initial_call=True,
+)
+def _toggle_vehicle_modal(card_clicks, _close_clicks, vehicles):
     trig = callback_context.triggered[0]["prop_id"] if callback_context.triggered else ""
 
-    if "crcc-modal-close" in trig:
+    if "vehicle-modal-close" in trig:
         return {**MODAL_OVERLAY_STYLE, "display": "none"}, no_update
 
     if not any(card_clicks or []):
@@ -1392,12 +1123,19 @@ def _toggle_comparison_modal(card_clicks, _close_clicks):
 
     prop_id = trig.rsplit(".", 1)[0]
     try:
-        cust_id = json.loads(prop_id)["index"]
+        vid = json.loads(prop_id)["index"]
     except Exception:
         return no_update, no_update
 
-    return {**MODAL_OVERLAY_STYLE, "display": "flex"}, _render_comparison_detail(cust_id)
+    vehicles = vehicles or []
+    match = next((v for v in vehicles if str(v.get("VEHICLE_ID")) == str(vid)), None)
+    if match is None:
+        return no_update, no_update
 
+    return {**MODAL_OVERLAY_STYLE, "display": "flex"}, _render_vehicle_detail(match)
+
+
+# =============================================================================
 
 if __name__ == "__main__":
-    app.run(debug=True, port=8056)
+    app.run(debug=True, port=8053)
