@@ -22,9 +22,6 @@ LOGO_PATH = BASE_DIR / "a.jpg"
 
 PRECOMPUTED_PATH = BASE_DIR / "precomputed_customer_vehicle_explorer" / "customer_vehicle_explorer_data.parquet"
 
-COUNTRIES_TO_READ: list[str] = ["SPAIN"]  # informational only here — actual scope was fixed
-                                           # when generate_customer_vehicle_explorer_precomputed.py last ran
-
 UNIQUE_KEY_COLS = ["ID_CONTRACT", "VEHICLE_ID", "ID_QUOTATION"]
 
 DATE_FIELDS = {
